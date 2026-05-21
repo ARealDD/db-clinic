@@ -59,7 +59,7 @@ fi
 # ---- Step 2: Start Rust gRPC server ----
 echo "=== Starting Rust gRPC server ==="
 cd "$REPO_ROOT/rust"
-cargo run -p agent-grpc-server -- --addr "$GRPC_ADDR" $MOCK_FLAG &
+cargo run -p agent-grpc-server -- --addr "$GRPC_ADDR" --skills-dir "$REPO_ROOT/skills" $MOCK_FLAG &
 GRPC_PID=$!
 
 echo "Waiting for gRPC server..."
@@ -102,7 +102,6 @@ echo "  gRPC server:   $GRPC_ADDR"
 [ -n "$MOCK_FLAG" ] && echo "                  (mock mode)"
 echo "  Web UI:        http://localhost:$FASTAPI_PORT"
 echo "  Settings:      http://localhost:$FASTAPI_PORT/static/settings.html"
-echo "  Skills API:    http://localhost:$FASTAPI_PORT/api/skills"
 echo "  Health:        http://localhost:$FASTAPI_PORT/api/health"
 echo "============================================"
 echo ""

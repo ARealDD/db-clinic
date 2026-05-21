@@ -5,6 +5,7 @@ use runtime::{ApiClient, ApiRequest, AssistantEvent, RuntimeError};
 
 use crate::mock::{MockApiClient, MockToolExecutor};
 use crate::real_client::{EventSink, RealApiClient};
+use crate::skill_engine::SkillEngine;
 
 pub enum AnyApiClient {
     Mock(MockApiClient),
@@ -36,6 +37,7 @@ pub struct SessionManager {
     cmd_tx: std::sync::mpsc::Sender<SessionCmd>,
     active_count: Arc<std::sync::atomic::AtomicUsize>,
     start_time: std::time::Instant,
+    skill_engine: Arc<SkillEngine>,
 }
 
 type CmdResult<T> = std::sync::mpsc::Sender<T>;
@@ -58,6 +60,7 @@ enum SessionCmd {
     RunTurnStreaming {
         session_id: String,
         user_text: String,
+        skill_context: Option<String>,
         event_tx: std::sync::mpsc::Sender<AssistantEvent>,
         reply: CmdResult<Option<Result<runtime::TurnSummary, runtime::RuntimeError>>>,
     },
@@ -73,7 +76,7 @@ enum SessionCmd {
 
 impl SessionManager {
     #[allow(clippy::too_many_lines)]
-    pub fn new() -> Self {
+    pub fn new(skill_engine: Arc<SkillEngine>) -> Self {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SessionCmd>();
         let active_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count_clone = active_count.clone();
@@ -144,6 +147,7 @@ impl SessionManager {
                         SessionCmd::RunTurnStreaming {
                             session_id,
                             user_text,
+                            skill_context,
                             event_tx,
                             reply,
                         } => {
@@ -151,7 +155,12 @@ impl SessionManager {
                                 if let Some(sink) = &entry.event_sink {
                                     *sink.lock().unwrap() = Some(event_tx);
                                 }
-                                let result = entry.runtime.run_turn(&user_text, None);
+                                let augmented = if let Some(ctx) = skill_context {
+                                    format!("{ctx}\n\n---\n\n{user_text}")
+                                } else {
+                                    user_text
+                                };
+                                let result = entry.runtime.run_turn(&augmented, None);
                                 if let Some(sink) = &entry.event_sink {
                                     *sink.lock().unwrap() = None;
                                 }
@@ -189,7 +198,12 @@ impl SessionManager {
             cmd_tx,
             active_count,
             start_time,
+            skill_engine,
         }
+    }
+
+    pub fn skill_engine(&self) -> &Arc<SkillEngine> {
+        &self.skill_engine
     }
 
     pub fn create_session(
@@ -216,6 +230,7 @@ impl SessionManager {
         &self,
         session_id: &str,
         user_text: &str,
+        skill_context: Option<String>,
         event_tx: std::sync::mpsc::Sender<AssistantEvent>,
     ) -> Option<Result<runtime::TurnSummary, runtime::RuntimeError>> {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -223,6 +238,7 @@ impl SessionManager {
             .send(SessionCmd::RunTurnStreaming {
                 session_id: session_id.to_string(),
                 user_text: user_text.to_string(),
+                skill_context,
                 event_tx,
                 reply: tx,
             })
@@ -253,8 +269,7 @@ impl SessionManager {
     }
 
     pub fn active_count(&self) -> usize {
-        self.active_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.active_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn uptime_seconds(&self) -> u64 {

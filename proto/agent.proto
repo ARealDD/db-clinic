@@ -165,6 +165,8 @@ message ChatOutput {
     ErrorEvent error = 7;
     // Token usage update (emitted after each LLM call).
     TokenUsage usage_update = 8;
+    // Matched diagnostic skills for the current user message.
+    SkillMatch skill_match = 9;
   }
 }
 
@@ -228,6 +230,18 @@ message InstructionCard {
   bool read_only = 6;
   // Optional structured parameters for display.
   map<string, string> parameters = 7;
+}
+
+message SkillMatch {
+  repeated MatchedSkillInfo skills = 1;
+}
+
+message MatchedSkillInfo {
+  string skill_id = 1;
+  string skill_name = 2;
+  string category = 3;
+  float score = 4;
+  string skill_type = 5;
 }
 
 message TurnComplete {

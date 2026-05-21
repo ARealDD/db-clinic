@@ -12,9 +12,7 @@ pub fn runtime_role_to_proto(role: runtime::MessageRole) -> i32 {
 pub fn runtime_content_block_to_proto(block: &runtime::ContentBlock) -> proto::ContentBlock {
     let block_oneof = match block {
         runtime::ContentBlock::Text { text } => {
-            proto::content_block::Block::Text(proto::TextContent {
-                text: text.clone(),
-            })
+            proto::content_block::Block::Text(proto::TextContent { text: text.clone() })
         }
         runtime::ContentBlock::Thinking {
             thinking,
@@ -50,7 +48,11 @@ pub fn runtime_content_block_to_proto(block: &runtime::ContentBlock) -> proto::C
 pub fn runtime_message_to_proto(msg: &runtime::ConversationMessage) -> proto::ConversationMessage {
     proto::ConversationMessage {
         role: runtime_role_to_proto(msg.role),
-        blocks: msg.blocks.iter().map(runtime_content_block_to_proto).collect(),
+        blocks: msg
+            .blocks
+            .iter()
+            .map(runtime_content_block_to_proto)
+            .collect(),
         usage: msg.usage.as_ref().map(runtime_usage_to_proto),
     }
 }

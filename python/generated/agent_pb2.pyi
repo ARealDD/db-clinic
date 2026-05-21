@@ -197,7 +197,7 @@ class CancelTurn(_message.Message):
     def __init__(self, reason: _Optional[str] = ...) -> None: ...
 
 class ChatOutput(_message.Message):
-    __slots__ = ("session_id", "text_delta", "thinking_delta", "tool_execution", "proxy_instruction", "turn_complete", "error", "usage_update")
+    __slots__ = ("session_id", "text_delta", "thinking_delta", "tool_execution", "proxy_instruction", "turn_complete", "error", "usage_update", "skill_match")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     TEXT_DELTA_FIELD_NUMBER: _ClassVar[int]
     THINKING_DELTA_FIELD_NUMBER: _ClassVar[int]
@@ -206,6 +206,7 @@ class ChatOutput(_message.Message):
     TURN_COMPLETE_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
     USAGE_UPDATE_FIELD_NUMBER: _ClassVar[int]
+    SKILL_MATCH_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     text_delta: TextDelta
     thinking_delta: ThinkingDelta
@@ -214,7 +215,8 @@ class ChatOutput(_message.Message):
     turn_complete: TurnComplete
     error: ErrorEvent
     usage_update: TokenUsage
-    def __init__(self, session_id: _Optional[str] = ..., text_delta: _Optional[_Union[TextDelta, _Mapping]] = ..., thinking_delta: _Optional[_Union[ThinkingDelta, _Mapping]] = ..., tool_execution: _Optional[_Union[ToolExecution, _Mapping]] = ..., proxy_instruction: _Optional[_Union[ProxyToolInstruction, _Mapping]] = ..., turn_complete: _Optional[_Union[TurnComplete, _Mapping]] = ..., error: _Optional[_Union[ErrorEvent, _Mapping]] = ..., usage_update: _Optional[_Union[TokenUsage, _Mapping]] = ...) -> None: ...
+    skill_match: SkillMatch
+    def __init__(self, session_id: _Optional[str] = ..., text_delta: _Optional[_Union[TextDelta, _Mapping]] = ..., thinking_delta: _Optional[_Union[ThinkingDelta, _Mapping]] = ..., tool_execution: _Optional[_Union[ToolExecution, _Mapping]] = ..., proxy_instruction: _Optional[_Union[ProxyToolInstruction, _Mapping]] = ..., turn_complete: _Optional[_Union[TurnComplete, _Mapping]] = ..., error: _Optional[_Union[ErrorEvent, _Mapping]] = ..., usage_update: _Optional[_Union[TokenUsage, _Mapping]] = ..., skill_match: _Optional[_Union[SkillMatch, _Mapping]] = ...) -> None: ...
 
 class TextDelta(_message.Message):
     __slots__ = ("content",)
@@ -282,6 +284,26 @@ class InstructionCard(_message.Message):
     read_only: bool
     parameters: _containers.ScalarMap[str, str]
     def __init__(self, command: _Optional[str] = ..., target_environment: _Optional[str] = ..., expected_format: _Optional[str] = ..., hint: _Optional[str] = ..., timeout_seconds: _Optional[int] = ..., read_only: bool = ..., parameters: _Optional[_Mapping[str, str]] = ...) -> None: ...
+
+class SkillMatch(_message.Message):
+    __slots__ = ("skills",)
+    SKILLS_FIELD_NUMBER: _ClassVar[int]
+    skills: _containers.RepeatedCompositeFieldContainer[MatchedSkillInfo]
+    def __init__(self, skills: _Optional[_Iterable[_Union[MatchedSkillInfo, _Mapping]]] = ...) -> None: ...
+
+class MatchedSkillInfo(_message.Message):
+    __slots__ = ("skill_id", "skill_name", "category", "score", "skill_type")
+    SKILL_ID_FIELD_NUMBER: _ClassVar[int]
+    SKILL_NAME_FIELD_NUMBER: _ClassVar[int]
+    CATEGORY_FIELD_NUMBER: _ClassVar[int]
+    SCORE_FIELD_NUMBER: _ClassVar[int]
+    SKILL_TYPE_FIELD_NUMBER: _ClassVar[int]
+    skill_id: str
+    skill_name: str
+    category: str
+    score: float
+    skill_type: str
+    def __init__(self, skill_id: _Optional[str] = ..., skill_name: _Optional[str] = ..., category: _Optional[str] = ..., score: _Optional[float] = ..., skill_type: _Optional[str] = ...) -> None: ...
 
 class TurnComplete(_message.Message):
     __slots__ = ("messages", "turn_usage", "stop_reason")

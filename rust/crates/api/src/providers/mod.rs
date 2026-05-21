@@ -272,8 +272,7 @@ pub fn max_tokens_for_model(model: &str) -> u32 {
         64_000
     };
 
-    model_token_limit(model)
-        .map_or(heuristic, |limit| heuristic.min(limit.max_output_tokens))
+    model_token_limit(model).map_or(heuristic, |limit| heuristic.min(limit.max_output_tokens))
 }
 
 /// Returns the effective max output tokens for a model, preferring a plugin

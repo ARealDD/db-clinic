@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use api::{
     AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
-    MessageRequest, OpenAiCompatClient, OpenAiCompatConfig, OutputContentBlock,
-    ProviderClient, StreamEvent, ToolResultContentBlock,
+    MessageRequest, OpenAiCompatClient, OpenAiCompatConfig, OutputContentBlock, ProviderClient,
+    StreamEvent, ToolResultContentBlock,
 };
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, MessageRole,
@@ -103,11 +103,15 @@ impl ApiClient for RealApiClient {
             ..Default::default()
         };
 
-        self.runtime
-            .block_on(stream_and_collect(&self.client, &message_request, &self.event_sink))
+        self.runtime.block_on(stream_and_collect(
+            &self.client,
+            &message_request,
+            &self.event_sink,
+        ))
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn stream_and_collect(
     client: &ProviderClient,
     message_request: &MessageRequest,
@@ -131,7 +135,14 @@ async fn stream_and_collect(
         match event {
             StreamEvent::MessageStart(start) => {
                 for block in start.message.content {
-                    push_output_block(block, 0, &mut events, &mut pending_tools, &mut pending_thinking, sink);
+                    push_output_block(
+                        block,
+                        0,
+                        &mut events,
+                        &mut pending_tools,
+                        &mut pending_thinking,
+                        sink,
+                    );
                 }
             }
             StreamEvent::ContentBlockStart(start) => {
@@ -161,10 +172,13 @@ async fn stream_and_collect(
                     if let Some((pending, _)) = pending_thinking.get_mut(&delta.index) {
                         pending.push_str(&thinking);
                     }
-                    emit(sink, &AssistantEvent::Thinking {
-                        thinking,
-                        signature: None,
-                    });
+                    emit(
+                        sink,
+                        &AssistantEvent::Thinking {
+                            thinking,
+                            signature: None,
+                        },
+                    );
                 }
                 ContentBlockDelta::SignatureDelta { signature } => {
                     if let Some((_, sig)) = pending_thinking.get_mut(&delta.index) {
@@ -227,13 +241,12 @@ fn push_output_block(
             }
         }
         OutputContentBlock::ToolUse { id, name, input } => {
-            let initial_input = if input.is_object()
-                && input.as_object().is_some_and(serde_json::Map::is_empty)
-            {
-                String::new()
-            } else {
-                input.to_string()
-            };
+            let initial_input =
+                if input.is_object() && input.as_object().is_some_and(serde_json::Map::is_empty) {
+                    String::new()
+                } else {
+                    input.to_string()
+                };
             pending_tools.insert(block_index, (id, name, initial_input));
         }
         OutputContentBlock::Thinking {

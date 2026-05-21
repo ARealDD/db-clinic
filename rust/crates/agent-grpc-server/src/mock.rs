@@ -1,4 +1,6 @@
-use runtime::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolError, ToolExecutor, TokenUsage};
+use runtime::{
+    ApiClient, ApiRequest, AssistantEvent, RuntimeError, TokenUsage, ToolError, ToolExecutor,
+};
 
 pub struct MockApiClient {
     call_count: usize,

@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -6,6 +9,7 @@ use crate::convert;
 use crate::proto;
 use crate::proto::agent_service_server::AgentService;
 use crate::session_store::{ApiConfig, SessionManager};
+use crate::skill_engine::SkillEngine;
 
 pub struct AgentServiceImpl {
     manager: SessionManager,
@@ -13,9 +17,14 @@ pub struct AgentServiceImpl {
 }
 
 impl AgentServiceImpl {
-    pub fn new(mock_mode: bool) -> Self {
+    pub fn new(mock_mode: bool, skills_root: Option<PathBuf>) -> Self {
+        let skill_engine = if let Some(root) = skills_root {
+            SkillEngine::load(&root)
+        } else {
+            SkillEngine::load(&PathBuf::from("skills"))
+        };
         Self {
-            manager: SessionManager::new(),
+            manager: SessionManager::new(skill_engine),
             mock_mode,
         }
     }
@@ -65,9 +74,7 @@ impl AgentService for AgentServiceImpl {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        eprintln!(
-            "created session {session_id} (model={model}, mock={mock_mode})"
-        );
+        eprintln!("created session {session_id} (model={model}, mock={mock_mode})");
 
         Ok(Response::new(proto::CreateSessionResponse {
             session_id,
@@ -93,13 +100,11 @@ impl AgentService for AgentServiceImpl {
                     let _ = tx
                         .send(Ok(proto::ChatOutput {
                             session_id: session_id.clone(),
-                            payload: Some(proto::chat_output::Payload::Error(
-                                proto::ErrorEvent {
-                                    code: proto::ErrorCode::ErrorInternal.into(),
-                                    message: "empty payload in ChatInput".to_string(),
-                                    recoverable: true,
-                                },
-                            )),
+                            payload: Some(proto::chat_output::Payload::Error(proto::ErrorEvent {
+                                code: proto::ErrorCode::ErrorInternal.into(),
+                                message: "empty payload in ChatInput".to_string(),
+                                recoverable: true,
+                            })),
                         }))
                         .await;
                     continue;
@@ -190,6 +195,41 @@ async fn handle_user_message(
     user_msg: &proto::UserMessage,
 ) {
     let user_text = user_msg.content.clone();
+    let skill_engine = Arc::clone(manager.skill_engine());
+
+    let user_text_for_match = user_text.clone();
+    let matched =
+        tokio::task::spawn_blocking(move || skill_engine.match_skills(&user_text_for_match, 3))
+            .await
+            .unwrap_or_default();
+
+    let skill_context = if matched.is_empty() {
+        None
+    } else {
+        let proto_skills: Vec<proto::MatchedSkillInfo> = matched
+            .iter()
+            .map(|m| proto::MatchedSkillInfo {
+                skill_id: m.id.clone(),
+                skill_name: m.name.clone(),
+                category: m.category.clone(),
+                score: m.score,
+                skill_type: m.skill_type.as_str().to_string(),
+            })
+            .collect();
+
+        let _ = tx
+            .send(Ok(proto::ChatOutput {
+                session_id: session_id.to_string(),
+                payload: Some(proto::chat_output::Payload::SkillMatch(proto::SkillMatch {
+                    skills: proto_skills,
+                })),
+            }))
+            .await;
+
+        let engine = Arc::clone(manager.skill_engine());
+        Some(engine.build_context(&matched))
+    };
+
     let mgr = manager.clone();
     let sid = session_id.to_string();
     let sid_for_stream = session_id.to_string();
@@ -216,17 +256,14 @@ async fn handle_user_message(
                                 content: thinking.clone(),
                             },
                         )),
-                        runtime::AssistantEvent::Usage(usage) => {
-                            Some(proto::chat_output::Payload::UsageUpdate(
-                                proto::TokenUsage {
-                                    input_tokens: usage.input_tokens,
-                                    output_tokens: usage.output_tokens,
-                                    cache_creation_input_tokens: usage
-                                        .cache_creation_input_tokens,
-                                    cache_read_input_tokens: usage.cache_read_input_tokens,
-                                },
-                            ))
-                        }
+                        runtime::AssistantEvent::Usage(usage) => Some(
+                            proto::chat_output::Payload::UsageUpdate(proto::TokenUsage {
+                                input_tokens: usage.input_tokens,
+                                output_tokens: usage.output_tokens,
+                                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                                cache_read_input_tokens: usage.cache_read_input_tokens,
+                            }),
+                        ),
                         runtime::AssistantEvent::MessageStop
                         | runtime::AssistantEvent::ToolUse { .. }
                         | runtime::AssistantEvent::PromptCache(_) => None,
@@ -243,10 +280,11 @@ async fn handle_user_message(
             .await
     });
 
-    let turn_result =
-        tokio::task::spawn_blocking(move || mgr.run_turn_streaming(&sid, &user_text, event_tx))
-            .await
-            .unwrap_or(None);
+    let turn_result = tokio::task::spawn_blocking(move || {
+        mgr.run_turn_streaming(&sid, &user_text, skill_context, event_tx)
+    })
+    .await
+    .unwrap_or(None);
 
     let _ = stream_forwarder.await;
 

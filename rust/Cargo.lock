@@ -14,6 +14,7 @@ version = "0.1.0"
 dependencies = [
  "api",
  "prost",
+ "regex",
  "runtime",
  "serde_json",
  "tokio",

@@ -23,17 +23,6 @@ app = FastAPI(title="Agent Gateway")
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 
-# ---------- Skill registries ----------
-
-from skills.registry import SkillRegistry, KnowledgeSkillRegistry
-from skills.simple_matcher import SimpleSkillMatcher
-
-_case_registry = SkillRegistry(catalog_dir=os.path.join(_PROJECT_ROOT, "skills", "case"))
-_knowledge_registry = KnowledgeSkillRegistry(knowledge_dir=os.path.join(_PROJECT_ROOT, "skills", "knowledge"))
-_skill_matcher = SimpleSkillMatcher(_case_registry, _knowledge_registry)
-log.info("loaded %d case skills, %d knowledge skills", len(_case_registry), len(_knowledge_registry))
-
-
 def _grpc_channel():
     return grpc.insecure_channel(GRPC_ADDR)
 
@@ -132,13 +121,6 @@ async def health():
         return {"status": "unavailable", "error": str(e)}
 
 
-@app.get("/api/skills")
-async def list_skills():
-    case_skills = [s.to_dict() for s in _case_registry.all()]
-    knowledge_skills = [s.to_dict() for s in _knowledge_registry.all()]
-    return {"case_skills": case_skills, "knowledge_skills": knowledge_skills}
-
-
 # ---------- WebSocket chat ----------
 
 class _ChatInputIterator:
@@ -213,6 +195,20 @@ def _chat_output_to_json(out: agent_pb2.ChatOutput) -> dict | None:
             "input_tokens": out.usage_update.input_tokens,
             "output_tokens": out.usage_update.output_tokens,
         }
+    if field == "skill_match":
+        return {
+            "type": "skill_match",
+            "skills": [
+                {
+                    "id": s.skill_id,
+                    "name": s.skill_name,
+                    "category": s.category,
+                    "score": round(s.score, 1),
+                    "type": s.skill_type,
+                }
+                for s in out.skill_match.skills
+            ],
+        }
     return None
 
 
@@ -271,20 +267,6 @@ async def ws_chat(ws: WebSocket, session_id: str):
             if msg_type == "user_message":
                 content = data.get("content", "")
                 log.info("session %s: user_message len=%d", session_id, len(content))
-
-                matched = _skill_matcher.match(content, top_k=3)
-                if matched:
-                    skill_info = [
-                        {"id": m.skill_id, "name": m.skill_name, "category": m.category,
-                         "score": round(m.score, 1), "type": m.skill_type}
-                        for m in matched
-                    ]
-                    ws_send_queue.put({"type": "skill_match", "skills": skill_info})
-                    log.info("session %s: matched skills: %s", session_id,
-                             [f"{m.skill_name}({m.score:.1f})" for m in matched])
-                    skill_context = _skill_matcher.build_context(matched)
-                    content = skill_context + "\n\n" + content
-
                 chat_input = agent_pb2.ChatInput(session_id=session_id)
                 chat_input.user_message.CopyFrom(agent_pb2.UserMessage(content=content))
                 input_iter.put(chat_input)
