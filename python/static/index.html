@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DB Diagnosis Assistant</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+header { background: #16213e; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460; }
+header h1 { font-size: 18px; color: #e94560; }
+#status { font-size: 13px; color: #888; }
+#status.connected { color: #4ecca3; }
+#status.error { color: #e94560; }
+#chat { flex: 1; overflow-y: auto; padding: 16px 24px; display: flex; flex-direction: column; gap: 12px; }
+
+.msg { max-width: 80%; padding: 10px 14px; border-radius: 10px; line-height: 1.6; word-break: break-word; font-size: 14px; }
+.msg.user { align-self: flex-end; background: #0f3460; color: #fff; border-bottom-right-radius: 2px; white-space: pre-wrap; }
+.msg.assistant { align-self: flex-start; background: #16213e; color: #e0e0e0; border-bottom-left-radius: 2px; border: 1px solid #0f3460; }
+.msg.system { align-self: center; background: transparent; color: #666; font-size: 12px; font-style: italic; }
+.msg.tool { align-self: flex-start; background: #1a1a2e; color: #4ecca3; font-size: 12px; border: 1px dashed #4ecca3; font-family: monospace; white-space: pre-wrap; }
+
+/* Markdown content styling */
+.msg.assistant h1, .msg.assistant h2, .msg.assistant h3,
+.msg.assistant h4, .msg.assistant h5, .msg.assistant h6 {
+  color: #e94560; margin: 12px 0 6px 0; line-height: 1.3;
+}
+.msg.assistant h1 { font-size: 1.4em; border-bottom: 1px solid #0f3460; padding-bottom: 4px; }
+.msg.assistant h2 { font-size: 1.25em; border-bottom: 1px solid #0f3460; padding-bottom: 3px; }
+.msg.assistant h3 { font-size: 1.1em; }
+.msg.assistant p { margin: 8px 0; }
+.msg.assistant ul, .msg.assistant ol { margin: 8px 0; padding-left: 24px; }
+.msg.assistant li { margin: 3px 0; }
+.msg.assistant blockquote { border-left: 3px solid #e94560; margin: 8px 0; padding: 4px 12px; color: #aaa; background: #1a1a2e; border-radius: 0 6px 6px 0; }
+.msg.assistant a { color: #4ecca3; text-decoration: none; }
+.msg.assistant a:hover { text-decoration: underline; }
+.msg.assistant table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+.msg.assistant th, .msg.assistant td { border: 1px solid #0f3460; padding: 6px 10px; text-align: left; }
+.msg.assistant th { background: #0f3460; color: #e0e0e0; }
+.msg.assistant tr:nth-child(even) { background: #1a1a2e; }
+.msg.assistant hr { border: none; border-top: 1px solid #0f3460; margin: 12px 0; }
+.msg.assistant img { max-width: 100%; border-radius: 6px; }
+.msg.assistant strong { color: #fff; }
+
+/* Inline code */
+.msg.assistant code {
+  background: #1a1a2e; color: #4ecca3; padding: 2px 6px; border-radius: 4px;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace; font-size: 0.9em;
+}
+/* Code blocks */
+.msg.assistant pre {
+  background: #0d1117; border: 1px solid #0f3460; border-radius: 8px;
+  margin: 10px 0; padding: 12px; overflow-x: auto;
+}
+.msg.assistant pre code {
+  background: transparent; color: #e0e0e0; padding: 0; font-size: 13px;
+  line-height: 1.5; display: block;
+}
+
+.thinking-block { align-self: flex-start; max-width: 80%; border: 1px solid #2a2a4a; border-radius: 10px; overflow: hidden; font-size: 13px; }
+.thinking-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #1e1e3a; cursor: pointer; user-select: none; color: #8888bb; }
+.thinking-header:hover { background: #252550; }
+.thinking-header .arrow { transition: transform 0.2s; font-size: 10px; }
+.thinking-header .arrow.open { transform: rotate(90deg); }
+.thinking-header .label { font-style: italic; }
+.thinking-header .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #444; border-top-color: #8888bb; border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.thinking-body { padding: 10px 12px; background: #16163a; color: #9999cc; white-space: pre-wrap; word-break: break-word; line-height: 1.5; max-height: 300px; overflow-y: auto; display: none; }
+.thinking-body.visible { display: block; }
+
+.cursor { display: inline-block; width: 2px; height: 1em; background: #e94560; animation: blink 0.6s step-end infinite; vertical-align: text-bottom; margin-left: 1px; }
+@keyframes blink { 50% { opacity: 0; } }
+
+#input-area { display: flex; gap: 8px; padding: 12px 24px; background: #16213e; border-top: 1px solid #0f3460; }
+#user-input { flex: 1; padding: 10px 14px; border: 1px solid #0f3460; border-radius: 8px; background: #1a1a2e; color: #e0e0e0; font-size: 14px; outline: none; resize: none; font-family: inherit; }
+#user-input:focus { border-color: #e94560; }
+#send-btn { padding: 10px 24px; background: #e94560; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; }
+#send-btn:hover { background: #c73650; }
+#send-btn:disabled { background: #444; cursor: not-allowed; }
+.usage { font-size: 11px; color: #555; text-align: center; margin-top: 4px; }
+
+/* Skill badges */
+.skill-badges { align-self: flex-start; display: flex; flex-wrap: wrap; gap: 6px; max-width: 80%; }
+.skill-badge { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 14px; font-size: 11px; font-weight: 500; line-height: 1; }
+.skill-badge.case { background: #0f3460; color: #6ec6ff; border: 1px solid #1a5296; }
+.skill-badge.knowledge { background: #1a3a2e; color: #4ecca3; border: 1px solid #2a6a4e; }
+.skill-badge .score { opacity: 0.6; font-size: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DB Diagnosis Assistant</h1>
+  <div style="display: flex; align-items: center; gap: 16px;">
+    <span id="status">Connecting...</span>
+    <a href="/static/settings.html" style="color: #4ecca3; text-decoration: none; font-size: 13px;">Settings</a>
+  </div>
+</header>
+
+<div id="chat"></div>
+
+<div id="input-area">
+  <textarea id="user-input" rows="1" placeholder="Describe your database issue..." disabled></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+marked.setOptions({
+  highlight: function(code, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      return hljs.highlight(code, { language: lang }).value;
+    }
+    return hljs.highlightAuto(code).value;
+  },
+  breaks: true,
+  gfm: true,
+});
+
+const chatEl = document.getElementById('chat');
+const inputEl = document.getElementById('user-input');
+const sendBtn = document.getElementById('send-btn');
+const statusEl = document.getElementById('status');
+
+let sessionId = null;
+let ws = null;
+let currentAssistantMsg = null;
+let currentAssistantRaw = '';
+let currentCursor = null;
+let currentThinkingBlock = null;
+let currentThinkingBody = null;
+let isThinking = false;
+let renderTimer = null;
+
+function addSkillBadges(skills) {
+  const container = document.createElement('div');
+  container.className = 'skill-badges';
+  for (const s of skills) {
+    const badge = document.createElement('span');
+    badge.className = 'skill-badge ' + s.type;
+    badge.innerHTML = s.name + ' <span class="score">' + s.score + '</span>';
+    badge.title = s.category + ' | ' + s.id;
+    container.appendChild(badge);
+  }
+  chatEl.appendChild(container);
+  scrollToBottom();
+}
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = cls || '';
+}
+
+function scrollToBottom() {
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function addMsg(text, cls) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + cls;
+  div.textContent = text;
+  chatEl.appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+function removeCursor() {
+  if (currentCursor && currentCursor.parentNode) {
+    currentCursor.parentNode.removeChild(currentCursor);
+    currentCursor = null;
+  }
+}
+
+function ensureAssistantMsg() {
+  if (!currentAssistantMsg) {
+    currentAssistantMsg = document.createElement('div');
+    currentAssistantMsg.className = 'msg assistant';
+    chatEl.appendChild(currentAssistantMsg);
+    currentAssistantRaw = '';
+  }
+  return currentAssistantMsg;
+}
+
+function renderMarkdown(el, raw) {
+  const html = DOMPurify.sanitize(marked.parse(raw), {
+    ADD_TAGS: ['hljs-keyword', 'hljs-string', 'hljs-number', 'hljs-comment',
+               'hljs-built_in', 'hljs-literal', 'hljs-type', 'hljs-attr',
+               'hljs-title', 'hljs-params', 'hljs-meta', 'hljs-symbol',
+               'hljs-variable', 'hljs-template-variable', 'hljs-addition',
+               'hljs-deletion', 'hljs-selector-class', 'hljs-selector-id',
+               'hljs-regexp', 'hljs-function', 'hljs-punctuation', 'hljs-operator',
+               'hljs-property', 'hljs-name', 'hljs-tag', 'hljs-section',
+               'hljs-subst', 'hljs-doctag', 'hljs-emphasis', 'hljs-strong'],
+    ALLOW_ARIA_ATTR: false,
+    ALLOW_DATA_ATTR: false,
+  });
+  el.innerHTML = html;
+}
+
+function scheduleRender() {
+  if (renderTimer) return;
+  renderTimer = requestAnimationFrame(() => {
+    renderTimer = null;
+    if (currentAssistantMsg && currentAssistantRaw) {
+      removeCursor();
+      renderMarkdown(currentAssistantMsg, currentAssistantRaw);
+      currentCursor = document.createElement('span');
+      currentCursor.className = 'cursor';
+      currentAssistantMsg.appendChild(currentCursor);
+      scrollToBottom();
+    }
+  });
+}
+
+function appendToAssistant(text) {
+  ensureAssistantMsg();
+  currentAssistantRaw += text;
+  scheduleRender();
+}
+
+function finalizeAssistant() {
+  if (renderTimer) {
+    cancelAnimationFrame(renderTimer);
+    renderTimer = null;
+  }
+  if (currentAssistantMsg && currentAssistantRaw) {
+    removeCursor();
+    renderMarkdown(currentAssistantMsg, currentAssistantRaw);
+  }
+}
+
+function startThinkingBlock() {
+  removeCursor();
+  isThinking = true;
+
+  currentThinkingBlock = document.createElement('div');
+  currentThinkingBlock.className = 'thinking-block';
+
+  const header = document.createElement('div');
+  header.className = 'thinking-header';
+  header.innerHTML = '<span class="spinner"></span><span class="arrow">&#9654;</span><span class="label">Thinking...</span>';
+  header.addEventListener('click', () => {
+    const body = currentThinkingBlock.querySelector('.thinking-body');
+    const arrow = header.querySelector('.arrow');
+    body.classList.toggle('visible');
+    arrow.classList.toggle('open');
+  });
+  currentThinkingBlock.appendChild(header);
+
+  currentThinkingBody = document.createElement('div');
+  currentThinkingBody.className = 'thinking-body visible';
+  currentThinkingBlock.appendChild(currentThinkingBody);
+
+  chatEl.appendChild(currentThinkingBlock);
+  scrollToBottom();
+}
+
+function appendToThinking(text) {
+  if (!currentThinkingBlock) {
+    startThinkingBlock();
+  }
+  currentThinkingBody.textContent += text;
+  scrollToBottom();
+}
+
+function finishThinking() {
+  if (currentThinkingBlock) {
+    const header = currentThinkingBlock.querySelector('.thinking-header');
+    const spinner = header.querySelector('.spinner');
+    if (spinner) spinner.remove();
+    header.querySelector('.label').textContent = 'Thinking (done)';
+    const body = currentThinkingBlock.querySelector('.thinking-body');
+    body.classList.remove('visible');
+    const arrow = header.querySelector('.arrow');
+    arrow.classList.remove('open');
+    isThinking = false;
+  }
+}
+
+async function createSession() {
+  setStatus('Creating session...', '');
+  try {
+    const cfgResp = await fetch('/api/config');
+    const cfg = await cfgResp.json();
+    if (!cfg.has_api_key) {
+      setStatus('No API key configured', 'error');
+      addMsg('No LLM provider configured. Go to Settings to configure your API key and model.', 'system');
+      const link = document.createElement('div');
+      link.className = 'msg system';
+      link.innerHTML = '<a href="/static/settings.html" style="color: #4ecca3;">Open Settings</a>';
+      chatEl.appendChild(link);
+      return;
+    }
+    const resp = await fetch('/api/sessions', { method: 'POST' });
+    const data = await resp.json();
+    sessionId = data.session_id;
+    setStatus('Session: ' + sessionId.substring(0, 8) + '...', 'connected');
+    connectWebSocket();
+  } catch (e) {
+    setStatus('Failed to create session: ' + e.message, 'error');
+    addMsg('Failed to connect to server. Is the backend running?', 'system');
+  }
+}
+
+function connectWebSocket() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws/chat/' + sessionId);
+
+  ws.onopen = function() {
+    setStatus('Connected — Session ' + sessionId.substring(0, 8) + '...', 'connected');
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+    addMsg('Connected. Type a message to start diagnosing.', 'system');
+  };
+
+  ws.onmessage = function(evt) {
+    const msg = JSON.parse(evt.data);
+    switch (msg.type) {
+      case 'text_delta':
+        if (isThinking) finishThinking();
+        appendToAssistant(msg.content);
+        break;
+      case 'thinking_delta':
+        appendToThinking(msg.content);
+        break;
+      case 'skill_match':
+        addSkillBadges(msg.skills);
+        break;
+      case 'tool_execution':
+        if (isThinking) finishThinking();
+        removeCursor();
+        if (msg.status === 'started') {
+          addMsg('tool: ' + msg.tool_name + ' (running...)', 'tool');
+        } else if (msg.status === 'completed' || msg.status === 'failed') {
+          const label = msg.status === 'failed' ? 'FAIL' : 'OK';
+          let text = label + ' tool: ' + msg.tool_name;
+          if (msg.output) text += '\n' + msg.output;
+          addMsg(text, 'tool');
+        }
+        break;
+      case 'turn_complete':
+        if (isThinking) finishThinking();
+        finalizeAssistant();
+        removeCursor();
+        currentAssistantMsg = null;
+        currentAssistantRaw = '';
+        currentThinkingBlock = null;
+        currentThinkingBody = null;
+        if (msg.usage && (msg.usage.input_tokens || msg.usage.output_tokens)) {
+          const u = document.createElement('div');
+          u.className = 'usage';
+          u.textContent = 'Tokens: ' + msg.usage.input_tokens + ' in / ' + msg.usage.output_tokens + ' out';
+          chatEl.appendChild(u);
+        }
+        inputEl.disabled = false;
+        sendBtn.disabled = false;
+        inputEl.focus();
+        break;
+      case 'error':
+        if (isThinking) finishThinking();
+        finalizeAssistant();
+        removeCursor();
+        addMsg('Error: ' + msg.message, 'system');
+        if (!msg.recoverable) {
+          inputEl.disabled = true;
+          sendBtn.disabled = true;
+        } else {
+          inputEl.disabled = false;
+          sendBtn.disabled = false;
+        }
+        break;
+      case 'usage_update':
+        break;
+      default:
+        console.log('unknown message type:', msg);
+    }
+  };
+
+  ws.onclose = function() {
+    setStatus('Disconnected', 'error');
+    inputEl.disabled = true;
+    sendBtn.disabled = true;
+    removeCursor();
+    addMsg('WebSocket disconnected.', 'system');
+  };
+
+  ws.onerror = function() {
+    setStatus('Connection error', 'error');
+  };
+}
+
+function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  addMsg(text, 'user');
+  ws.send(JSON.stringify({ type: 'user_message', content: text }));
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  inputEl.disabled = true;
+  sendBtn.disabled = true;
+  currentAssistantMsg = null;
+  currentAssistantRaw = '';
+  currentThinkingBlock = null;
+  currentThinkingBody = null;
+  isThinking = false;
+}
+
+sendBtn.addEventListener('click', sendMessage);
+inputEl.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+inputEl.addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+});
+
+createSession();
+</script>
+</body>
+</html>

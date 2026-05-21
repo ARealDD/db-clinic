@@ -1,0 +1,351 @@
+syntax = "proto3";
+
+package agent;
+
+option java_package = "com.claw.agent.grpc";
+option go_package = "github.com/claw-code/proto/agent";
+
+// ============================================================================
+// Service Definition
+// ============================================================================
+
+service AgentService {
+  // Create a new agent conversation session in the Rust kernel.
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+
+  // Bidirectional streaming RPC for real-time dialogue.
+  // Python sends: user messages, proxy tool results.
+  // Rust returns: LLM text deltas, tool executions, proxy instructions, etc.
+  rpc Chat(stream ChatInput) returns (stream ChatOutput);
+
+  // Gracefully close a session and release kernel resources.
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+
+  // Health check for load balancer / connection pool.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================================================
+// Session Lifecycle
+// ============================================================================
+
+message CreateSessionRequest {
+  // LLM model identifier (e.g., "claude-sonnet-4-20250514").
+  string model = 1;
+
+  // System prompt segments injected into the conversation.
+  repeated string system_prompts = 2;
+
+  // Session-level configuration overrides.
+  SessionConfig config = 3;
+
+  // LLM API credentials and endpoint configuration.
+  // When absent, the server falls back to mock mode.
+  ApiConfig api_config = 4;
+}
+
+message ApiConfig {
+  // Provider identifier: "anthropic", "openai", "xai", "dashscope", "custom".
+  string provider = 1;
+  // API key / bearer token for the provider.
+  string api_key = 2;
+  // Optional base URL override (e.g., "https://api.openai.com/v1").
+  string base_url = 3;
+}
+
+message SessionConfig {
+  // Max agent loop iterations per turn (default: 10).
+  int32 max_iterations = 1;
+
+  // Execution mode preference for the session.
+  ExecutionMode default_execution_mode = 2;
+
+  // Tool names explicitly enabled for this session (empty = all available).
+  repeated string enabled_tools = 3;
+
+  // Skill identifiers to load for this session.
+  repeated string skill_ids = 4;
+
+  // Input token threshold to trigger automatic context compaction.
+  uint32 auto_compaction_threshold = 5;
+}
+
+enum ExecutionMode {
+  EXECUTION_MODE_UNSPECIFIED = 0;
+  // System executes tools directly (e.g., parse SQL, analyze logs).
+  EXECUTION_MODE_LOCAL = 1;
+  // Generate instruction card for user proxy execution.
+  EXECUTION_MODE_PROXY = 2;
+  // Session may contain both local and proxy tools.
+  EXECUTION_MODE_HYBRID = 3;
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+  // Timestamp (ms since epoch) when the session was created.
+  uint64 created_at_ms = 2;
+}
+
+message CloseSessionRequest {
+  string session_id = 1;
+}
+
+message CloseSessionResponse {
+  // Final cumulative token usage for the closed session.
+  TokenUsage total_usage = 1;
+}
+
+// ============================================================================
+// Chat — Bidirectional Streaming
+// ============================================================================
+
+// Messages sent from Python orchestration layer to Rust agent kernel.
+message ChatInput {
+  string session_id = 1;
+
+  oneof payload {
+    // New user message to the agent.
+    UserMessage user_message = 2;
+    // Result of a proxy tool execution (user backfill).
+    ProxyToolResult proxy_result = 3;
+    // Client-initiated cancellation of the current turn.
+    CancelTurn cancel = 4;
+  }
+}
+
+message UserMessage {
+  // The user's text input.
+  string content = 1;
+
+  // Optional context injected alongside the user message
+  // (e.g., selected code, file content, RAG retrieval results).
+  repeated ContextAttachment context = 2;
+}
+
+message ContextAttachment {
+  // Identifier for the context source (e.g., "rag", "file", "selection").
+  string source = 1;
+  // Context content as text.
+  string content = 2;
+  // Optional metadata (e.g., file path, retrieval score).
+  map<string, string> metadata = 3;
+}
+
+message ProxyToolResult {
+  // Matches the instruction_id from the ProxyToolInstruction.
+  string instruction_id = 1;
+  // The tool_use_id this result corresponds to.
+  string tool_use_id = 2;
+  // The output produced by user execution.
+  string output = 3;
+  // Whether the execution failed.
+  bool is_error = 4;
+}
+
+message CancelTurn {
+  string reason = 1;
+}
+
+// Messages sent from Rust agent kernel to Python orchestration layer.
+message ChatOutput {
+  string session_id = 1;
+
+  oneof payload {
+    // Streaming text fragment from LLM.
+    TextDelta text_delta = 2;
+    // LLM thinking/reasoning block (extended thinking).
+    ThinkingDelta thinking_delta = 3;
+    // A local tool is being executed by the kernel.
+    ToolExecution tool_execution = 4;
+    // A proxy tool instruction card for user execution.
+    ProxyToolInstruction proxy_instruction = 5;
+    // The current agent turn has completed.
+    TurnComplete turn_complete = 6;
+    // Error event during the turn.
+    ErrorEvent error = 7;
+    // Token usage update (emitted after each LLM call).
+    TokenUsage usage_update = 8;
+  }
+}
+
+// ============================================================================
+// Chat Output Payloads
+// ============================================================================
+
+message TextDelta {
+  string content = 1;
+}
+
+message ThinkingDelta {
+  string content = 1;
+}
+
+message ToolExecution {
+  // Unique tool invocation ID (matches LLM tool_use ID).
+  string tool_use_id = 1;
+  string tool_name = 2;
+  // JSON-encoded tool input from the LLM.
+  string input_json = 3;
+  ToolExecutionStatus status = 4;
+  // Populated when status is COMPLETED or FAILED.
+  string output = 5;
+  bool is_error = 6;
+  // Execution duration in milliseconds.
+  uint32 duration_ms = 7;
+}
+
+enum ToolExecutionStatus {
+  TOOL_EXECUTION_STATUS_UNSPECIFIED = 0;
+  TOOL_EXECUTION_STARTED = 1;
+  TOOL_EXECUTION_COMPLETED = 2;
+  TOOL_EXECUTION_FAILED = 3;
+}
+
+message ProxyToolInstruction {
+  // Unique instruction ID for tracking lifecycle.
+  string instruction_id = 1;
+  // The tool_use_id from the LLM request.
+  string tool_use_id = 2;
+  // Tool name (e.g., "execute_sql", "collect_pg_stat").
+  string tool_name = 3;
+
+  // Structured instruction card for the operator.
+  InstructionCard card = 4;
+}
+
+message InstructionCard {
+  // Human-readable command or action to perform.
+  string command = 1;
+  // Target environment description (e.g., "production PostgreSQL on host db-01").
+  string target_environment = 2;
+  // Expected output format hint (e.g., "text", "json", "csv").
+  string expected_format = 3;
+  // Human-readable hint or safety notes for the operator.
+  string hint = 4;
+  // Timeout in seconds (0 = no timeout). Kernel pauses until result or timeout.
+  uint32 timeout_seconds = 5;
+  // Whether the command is read-only (informational for the operator).
+  bool read_only = 6;
+  // Optional structured parameters for display.
+  map<string, string> parameters = 7;
+}
+
+message TurnComplete {
+  // Complete messages produced in this turn, for Python-side persistence.
+  repeated ConversationMessage messages = 1;
+  // Token usage for this turn.
+  TokenUsage turn_usage = 2;
+  // Whether the agent loop naturally stopped (vs. hitting max iterations).
+  TurnStopReason stop_reason = 3;
+}
+
+enum TurnStopReason {
+  TURN_STOP_REASON_UNSPECIFIED = 0;
+  // LLM produced end_turn stop.
+  TURN_STOP_END_TURN = 1;
+  // Reached max_iterations limit.
+  TURN_STOP_MAX_ITERATIONS = 2;
+  // Client requested cancellation.
+  TURN_STOP_CANCELLED = 3;
+  // Waiting for proxy tool result (turn paused, not ended).
+  TURN_STOP_AWAITING_PROXY = 4;
+}
+
+message ErrorEvent {
+  ErrorCode code = 1;
+  string message = 2;
+  // Whether the error is recoverable (client can retry or send new input).
+  bool recoverable = 3;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_LLM_API_FAILURE = 1;
+  ERROR_LLM_RATE_LIMITED = 2;
+  ERROR_TOOL_EXECUTION_FAILED = 3;
+  ERROR_SESSION_NOT_FOUND = 4;
+  ERROR_SESSION_EXPIRED = 5;
+  ERROR_PROXY_TIMEOUT = 6;
+  ERROR_INTERNAL = 7;
+  ERROR_CONTEXT_TOO_LONG = 8;
+}
+
+// ============================================================================
+// Shared Types
+// ============================================================================
+
+message TokenUsage {
+  uint32 input_tokens = 1;
+  uint32 output_tokens = 2;
+  uint32 cache_creation_input_tokens = 3;
+  uint32 cache_read_input_tokens = 4;
+}
+
+// Maps to Rust ContentBlock enum for persistence.
+message ConversationMessage {
+  MessageRole role = 1;
+  repeated ContentBlock blocks = 2;
+  TokenUsage usage = 3;
+}
+
+enum MessageRole {
+  MESSAGE_ROLE_UNSPECIFIED = 0;
+  MESSAGE_ROLE_SYSTEM = 1;
+  MESSAGE_ROLE_USER = 2;
+  MESSAGE_ROLE_ASSISTANT = 3;
+  MESSAGE_ROLE_TOOL = 4;
+}
+
+message ContentBlock {
+  oneof block {
+    TextContent text = 1;
+    ThinkingContent thinking = 2;
+    ToolUseContent tool_use = 3;
+    ToolResultContent tool_result = 4;
+  }
+}
+
+message TextContent {
+  string text = 1;
+}
+
+message ThinkingContent {
+  string thinking = 1;
+  optional string signature = 2;
+}
+
+message ToolUseContent {
+  string id = 1;
+  string name = 2;
+  // JSON-encoded input.
+  string input = 3;
+}
+
+message ToolResultContent {
+  string tool_use_id = 1;
+  string tool_name = 2;
+  string output = 3;
+  bool is_error = 4;
+}
+
+// ============================================================================
+// Health Check
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  ServiceStatus status = 1;
+  // Number of active sessions in the kernel.
+  uint32 active_sessions = 2;
+  // Uptime in seconds.
+  uint64 uptime_seconds = 3;
+  // Service version string.
+  string version = 4;
+}
+
+enum ServiceStatus {
+  SERVICE_STATUS_UNSPECIFIED = 0;
+  SERVICE_STATUS_SERVING = 1;
+  SERVICE_STATUS_NOT_SERVING = 2;
+}
