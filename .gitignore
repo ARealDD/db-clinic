@@ -2,6 +2,13 @@ __pycache__/
 archive/
 .omx/
 .clawd-agents/
+
+# Rust build artifacts
+rust/target/
+
+# Python generated stubs
+python/generated/
+
 # Claude Code local artifacts
 .claude/settings.local.json
 .claude/sessions/
