@@ -166,12 +166,29 @@ def _chat_output_to_json(out: agent_pb2.ChatOutput) -> dict | None:
         }
     if field == "proxy_instruction":
         pi = out.proxy_instruction
+        card = pi.card
+        parameters = dict(card.parameters) if card else {}
         return {
             "type": "proxy_instruction",
             "instruction_id": pi.instruction_id,
+            "tool_use_id": pi.tool_use_id,
             "tool_name": pi.tool_name,
-            "command": pi.card.command if pi.card else "",
-            "hint": pi.card.hint if pi.card else "",
+            "command": card.command if card else "",
+            "target_environment": card.target_environment if card else "",
+            "expected_format": card.expected_format if card else "",
+            "hint": card.hint if card else "",
+            "timeout_seconds": card.timeout_seconds if card else 0,
+            "read_only": card.read_only if card else False,
+            "parameters": parameters,
+            "purpose": card.purpose if card else "",
+        }
+    if field == "proxy_instruction_expired":
+        pe = out.proxy_instruction_expired
+        return {
+            "type": "proxy_instruction_expired",
+            "instruction_id": pe.instruction_id,
+            "tool_use_id": pe.tool_use_id,
+            "reason": pe.reason,
         }
     if field == "turn_complete":
         tc = out.turn_complete
@@ -274,6 +291,25 @@ async def ws_chat(ws: WebSocket, session_id: str):
                 chat_input = agent_pb2.ChatInput(session_id=session_id)
                 chat_input.cancel.CopyFrom(agent_pb2.CancelTurn(reason="user cancelled"))
                 input_iter.put(chat_input)
+            elif msg_type == "proxy_result":
+                instruction_id = data.get("instruction_id", "")
+                tool_use_id = data.get("tool_use_id", "")
+                output = data.get("output", "")
+                is_error = bool(data.get("is_error", False))
+                log.info(
+                    "session %s: proxy_result instruction=%s is_error=%s len=%d",
+                    session_id, instruction_id, is_error, len(output),
+                )
+                chat_input = agent_pb2.ChatInput(session_id=session_id)
+                chat_input.proxy_result.CopyFrom(
+                    agent_pb2.ProxyToolResult(
+                        instruction_id=instruction_id,
+                        tool_use_id=tool_use_id,
+                        output=output,
+                        is_error=is_error,
+                    )
+                )
+                input_iter.put(chat_input)
             else:
                 await ws.send_json({"type": "error", "message": f"unknown message type: {msg_type}"})
     except WebSocketDisconnect:
@@ -288,4 +324,19 @@ async def ws_chat(ws: WebSocket, session_id: str):
             response_stream.cancel()
         except Exception:
             pass
+        # Browser refresh closes the WS without firing DELETE /api/sessions,
+        # so the rust session would otherwise linger — and if its turn was
+        # mid-proxy-wait, the session-manager thread stays blocked, queueing
+        # every subsequent gRPC command behind it. Explicitly close the
+        # session on the rust side; the close path cancels any in-flight turn
+        # via an atomic flag so the manager unblocks within ~500ms.
+        try:
+            with _grpc_channel() as cleanup_ch:
+                cleanup_stub = agent_pb2_grpc.AgentServiceStub(cleanup_ch)
+                cleanup_stub.CloseSession(
+                    agent_pb2.CloseSessionRequest(session_id=session_id)
+                )
+            log.info("closed session %s (ws disconnect)", session_id)
+        except Exception as e:
+            log.warning("close_session on ws disconnect failed for %s: %s", session_id, e)
         ch.close()

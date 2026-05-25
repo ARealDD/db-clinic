@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use api::{
     AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
     MessageRequest, OpenAiCompatClient, OpenAiCompatConfig, OutputContentBlock, ProviderClient,
-    StreamEvent, ToolResultContentBlock,
+    StreamEvent, ToolDefinition, ToolResultContentBlock,
 };
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, MessageRole,
@@ -18,6 +18,7 @@ pub struct RealApiClient {
     client: ProviderClient,
     model: String,
     event_sink: EventSink,
+    tool_definitions: Vec<ToolDefinition>,
 }
 
 impl RealApiClient {
@@ -26,6 +27,7 @@ impl RealApiClient {
         api_key: &str,
         base_url: &str,
         model: &str,
+        tool_definitions: Vec<ToolDefinition>,
     ) -> Result<(Self, EventSink), String> {
         let client = match provider {
             "anthropic" => {
@@ -71,6 +73,7 @@ impl RealApiClient {
                 client,
                 model: model.to_string(),
                 event_sink,
+                tool_definitions,
             },
             sink_clone,
         ))
@@ -92,12 +95,13 @@ impl ApiClient for RealApiClient {
             (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
         let max_tokens = api::max_tokens_for_model(&self.model);
 
+        let tools = (!self.tool_definitions.is_empty()).then(|| self.tool_definitions.clone());
         let message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens,
             messages,
             system,
-            tools: None,
+            tools,
             tool_choice: None,
             stream: true,
             ..Default::default()

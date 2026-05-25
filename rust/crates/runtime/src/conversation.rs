@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 use telemetry::SessionTracer;
@@ -140,6 +142,13 @@ pub struct ConversationRuntime<C, T> {
     hook_abort_signal: HookAbortSignal,
     hook_progress_reporter: Option<Box<dyn HookProgressReporter>>,
     session_tracer: Option<SessionTracer>,
+    /// External cancel signal. When set, the iteration loop exits with
+    /// `Err("turn cancelled")` before the next LLM call. Used by the chat
+    /// server to abort an orphan turn when the WebSocket session closes —
+    /// without this, the runtime treats `ToolError` from a cancelled proxy
+    /// call as a normal tool failure and keeps looping into more LLM calls
+    /// until `max_iterations`.
+    cancel_signal: Option<Arc<AtomicBool>>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -189,6 +198,7 @@ where
             hook_abort_signal: HookAbortSignal::default(),
             hook_progress_reporter: None,
             session_tracer: None,
+            cancel_signal: None,
         }
     }
 
@@ -222,6 +232,15 @@ where
     #[must_use]
     pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
         self.session_tracer = Some(session_tracer);
+        self
+    }
+
+    /// Attach an external cancel signal. When the flag is set to `true`, the
+    /// next iteration of `run_turn` aborts with a `RuntimeError` instead of
+    /// dispatching another LLM call.
+    #[must_use]
+    pub fn with_cancel_signal(mut self, signal: Arc<AtomicBool>) -> Self {
+        self.cancel_signal = Some(signal);
         self
     }
 
@@ -351,6 +370,14 @@ where
                 );
                 self.record_turn_failed(iterations, &error);
                 return Err(error);
+            }
+
+            if let Some(signal) = &self.cancel_signal {
+                if signal.load(Ordering::Relaxed) {
+                    let error = RuntimeError::new("turn cancelled");
+                    self.record_turn_failed(iterations, &error);
+                    return Err(error);
+                }
             }
 
             let request = ApiRequest {

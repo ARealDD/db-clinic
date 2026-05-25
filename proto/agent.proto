@@ -167,7 +167,15 @@ message ChatOutput {
     TokenUsage usage_update = 8;
     // Matched diagnostic skills for the current user message.
     SkillMatch skill_match = 9;
+    // A previously issued proxy instruction has expired (timeout reached).
+    ProxyInstructionExpired proxy_instruction_expired = 10;
   }
+}
+
+message ProxyInstructionExpired {
+  string instruction_id = 1;
+  string tool_use_id = 2;
+  string reason = 3; // e.g., "timeout", "cancelled"
 }
 
 // ============================================================================
@@ -230,6 +238,11 @@ message InstructionCard {
   bool read_only = 6;
   // Optional structured parameters for display.
   map<string, string> parameters = 7;
+  // Agent's stated purpose for this action — what it is trying to learn or
+  // accomplish. Lets the operator judge intent before executing, and reply
+  // with feedback (via is_error=true result) if the goal is wrong or there
+  // is a better way. Sourced from the bash tool's `description` input field.
+  string purpose = 8;
 }
 
 message SkillMatch {

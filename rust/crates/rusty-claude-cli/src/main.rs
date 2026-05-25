@@ -13,13 +13,13 @@ mod render;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::net::TcpListener;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -187,8 +187,48 @@ const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--print",
     "--compact",
     "--base-commit",
+    "--proxy",
     "-p",
 ];
+
+/// Process-wide proxy-mode switch. Set once via `--proxy` in `parse_args`,
+/// read by `CliToolExecutor` at construction so every later runtime build
+/// (REPL bootstrap, /resume, model switch) picks it up without threading a
+/// new arg through ~15 `build_runtime` call sites.
+static CLI_PROXY_MODE: OnceLock<bool> = OnceLock::new();
+
+fn cli_proxy_mode_enabled() -> bool {
+    *CLI_PROXY_MODE.get().unwrap_or(&false)
+}
+
+/// Tools that prompt the human instead of executing locally when --proxy is on.
+/// Mirrors the agent-grpc-server `CompositeToolExecutor` proxy set.
+const PROXY_TOOL_NAMES: &[&str] = &[
+    "bash",
+    "Bash",
+    "powershell",
+    "PowerShell",
+    "PowershellTool",
+    "repl",
+    "REPL",
+    "ReplTool",
+];
+
+/// Tools blocked in proxy mode regardless of routing (matches agent-grpc-server).
+const PROXY_DISABLED_TOOL_NAMES: &[&str] = &[
+    "WebFetch",
+    "WebSearch",
+    "RemoteTrigger",
+    "MCPTool",
+    "ListMcpResourcesTool",
+    "ReadMcpResourceTool",
+    "McpAuth",
+];
+
+/// Sentinel line that terminates a proxy-result paste on stdin.
+const PROXY_RESULT_END_MARKER: &str = "---END---";
+/// Marker the user prepends/sets to mark the result as an error.
+const PROXY_RESULT_ERROR_MARKER: &str = "---ERROR---";
 
 type AllowedToolSet = BTreeSet<String>;
 type RuntimePluginStateBuildOutput = (
@@ -738,6 +778,12 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             "--allow-broad-cwd" => {
                 allow_broad_cwd = true;
+                index += 1;
+            }
+            "--proxy" => {
+                // Process-wide switch; CliToolExecutor::new reads this
+                // lazily so every later runtime construction inherits it.
+                let _ = CLI_PROXY_MODE.set(true);
                 index += 1;
             }
             "-p" => {
@@ -9488,6 +9534,8 @@ struct CliToolExecutor {
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
+    proxy_mode: bool,
+    proxy_seq: u64,
 }
 
 impl CliToolExecutor {
@@ -9503,6 +9551,86 @@ impl CliToolExecutor {
             allowed_tools,
             tool_registry,
             mcp_state,
+            proxy_mode: cli_proxy_mode_enabled(),
+            proxy_seq: 0,
+        }
+    }
+
+    fn next_proxy_instruction_id(&mut self) -> String {
+        self.proxy_seq += 1;
+        let ts = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        format!("proxy-{ts}-{}", self.proxy_seq)
+    }
+
+    /// Render an instruction card to stdout and block on stdin until the user
+    /// supplies the result terminated by `PROXY_RESULT_END_MARKER` on its own
+    /// line. A leading `PROXY_RESULT_ERROR_MARKER` line marks the result as a
+    /// failure that the model should treat like a tool error.
+    fn execute_via_proxy(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        let instruction_id = self.next_proxy_instruction_id();
+        let mut stdout = io::stdout();
+        let _ = writeln!(stdout);
+        let _ = writeln!(stdout, "==================== PROXY INSTRUCTION ====================");
+        let _ = writeln!(stdout, "id:   {instruction_id}");
+        let _ = writeln!(stdout, "tool: {tool_name}");
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(input) {
+            let pretty =
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| input.to_string());
+            let _ = writeln!(stdout, "input:");
+            for line in pretty.lines() {
+                let _ = writeln!(stdout, "  {line}");
+            }
+        } else {
+            let _ = writeln!(stdout, "input: {input}");
+        }
+        let _ = writeln!(stdout, "-----------------------------------------------------------");
+        let _ = writeln!(
+            stdout,
+            "Execute the tool yourself, then paste the output below."
+        );
+        let _ = writeln!(
+            stdout,
+            "Finish with a line containing only `{PROXY_RESULT_END_MARKER}` (success)"
+        );
+        let _ = writeln!(
+            stdout,
+            "  or `{PROXY_RESULT_ERROR_MARKER}` (mark the result as a tool error)."
+        );
+        let _ = writeln!(stdout, "===========================================================");
+        let _ = stdout.flush();
+
+        let mut output_lines: Vec<String> = Vec::new();
+        let mut is_error = false;
+        let stdin = io::stdin();
+        loop {
+            let mut line = String::new();
+            match stdin.lock().read_line(&mut line) {
+                Ok(0) => break, // EOF — treat as end
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if trimmed == PROXY_RESULT_END_MARKER {
+                        break;
+                    }
+                    if trimmed == PROXY_RESULT_ERROR_MARKER {
+                        is_error = true;
+                        break;
+                    }
+                    output_lines.push(trimmed.to_string());
+                }
+                Err(error) => {
+                    return Err(ToolError::new(format!(
+                        "proxy: failed to read result from stdin: {error}"
+                    )));
+                }
+            }
+        }
+        let output = output_lines.join("\n");
+        if is_error {
+            Err(ToolError::new(output))
+        } else {
+            Ok(output)
         }
     }
 
@@ -9577,6 +9705,27 @@ impl ToolExecutor for CliToolExecutor {
             return Err(ToolError::new(format!(
                 "tool `{tool_name}` is not enabled by the current --allowedTools setting"
             )));
+        }
+        if self.proxy_mode {
+            if PROXY_DISABLED_TOOL_NAMES.contains(&tool_name) {
+                return Err(ToolError::new(format!(
+                    "tool `{tool_name}` is disabled in --proxy mode"
+                )));
+            }
+            if PROXY_TOOL_NAMES.contains(&tool_name) {
+                let result = self.execute_via_proxy(tool_name, input);
+                if self.emit_output {
+                    let (text, is_error) = match &result {
+                        Ok(output) => (output.clone(), false),
+                        Err(error) => (error.to_string(), true),
+                    };
+                    let markdown = format_tool_result(tool_name, &text, is_error);
+                    self.renderer
+                        .stream_markdown(&markdown, &mut io::stdout())
+                        .map_err(|error| ToolError::new(error.to_string()))?;
+                }
+                return result;
+            }
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
@@ -9761,6 +9910,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  --dangerously-skip-permissions  Skip all permission checks"
     )?;
     writeln!(out, "  --allowedTools TOOLS       Restrict enabled tools (repeatable; comma-separated aliases supported)")?;
+    writeln!(
+        out,
+        "  --proxy                    Print bash/PowerShell/REPL calls as instruction cards on stdout; read stdin until a `{PROXY_RESULT_END_MARKER}` (success) or `{PROXY_RESULT_ERROR_MARKER}` (error) line"
+    )?;
     writeln!(
         out,
         "  --version, -V              Print version and build information locally"

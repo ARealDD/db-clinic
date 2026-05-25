@@ -1,6 +1,4 @@
-use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, RuntimeError, TokenUsage, ToolError, ToolExecutor,
-};
+use runtime::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, TokenUsage};
 
 pub struct MockApiClient {
     call_count: usize,
@@ -29,16 +27,5 @@ impl ApiClient for MockApiClient {
             }),
             AssistantEvent::MessageStop,
         ])
-    }
-}
-
-pub struct MockToolExecutor;
-
-impl ToolExecutor for MockToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
-        Ok(format!(
-            "[Mock tool result] tool={tool_name} input_length={len}",
-            len = input.len()
-        ))
     }
 }

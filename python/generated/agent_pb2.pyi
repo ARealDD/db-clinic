@@ -197,7 +197,7 @@ class CancelTurn(_message.Message):
     def __init__(self, reason: _Optional[str] = ...) -> None: ...
 
 class ChatOutput(_message.Message):
-    __slots__ = ("session_id", "text_delta", "thinking_delta", "tool_execution", "proxy_instruction", "turn_complete", "error", "usage_update", "skill_match")
+    __slots__ = ("session_id", "text_delta", "thinking_delta", "tool_execution", "proxy_instruction", "turn_complete", "error", "usage_update", "skill_match", "proxy_instruction_expired")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     TEXT_DELTA_FIELD_NUMBER: _ClassVar[int]
     THINKING_DELTA_FIELD_NUMBER: _ClassVar[int]
@@ -207,6 +207,7 @@ class ChatOutput(_message.Message):
     ERROR_FIELD_NUMBER: _ClassVar[int]
     USAGE_UPDATE_FIELD_NUMBER: _ClassVar[int]
     SKILL_MATCH_FIELD_NUMBER: _ClassVar[int]
+    PROXY_INSTRUCTION_EXPIRED_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     text_delta: TextDelta
     thinking_delta: ThinkingDelta
@@ -216,7 +217,18 @@ class ChatOutput(_message.Message):
     error: ErrorEvent
     usage_update: TokenUsage
     skill_match: SkillMatch
-    def __init__(self, session_id: _Optional[str] = ..., text_delta: _Optional[_Union[TextDelta, _Mapping]] = ..., thinking_delta: _Optional[_Union[ThinkingDelta, _Mapping]] = ..., tool_execution: _Optional[_Union[ToolExecution, _Mapping]] = ..., proxy_instruction: _Optional[_Union[ProxyToolInstruction, _Mapping]] = ..., turn_complete: _Optional[_Union[TurnComplete, _Mapping]] = ..., error: _Optional[_Union[ErrorEvent, _Mapping]] = ..., usage_update: _Optional[_Union[TokenUsage, _Mapping]] = ..., skill_match: _Optional[_Union[SkillMatch, _Mapping]] = ...) -> None: ...
+    proxy_instruction_expired: ProxyInstructionExpired
+    def __init__(self, session_id: _Optional[str] = ..., text_delta: _Optional[_Union[TextDelta, _Mapping]] = ..., thinking_delta: _Optional[_Union[ThinkingDelta, _Mapping]] = ..., tool_execution: _Optional[_Union[ToolExecution, _Mapping]] = ..., proxy_instruction: _Optional[_Union[ProxyToolInstruction, _Mapping]] = ..., turn_complete: _Optional[_Union[TurnComplete, _Mapping]] = ..., error: _Optional[_Union[ErrorEvent, _Mapping]] = ..., usage_update: _Optional[_Union[TokenUsage, _Mapping]] = ..., skill_match: _Optional[_Union[SkillMatch, _Mapping]] = ..., proxy_instruction_expired: _Optional[_Union[ProxyInstructionExpired, _Mapping]] = ...) -> None: ...
+
+class ProxyInstructionExpired(_message.Message):
+    __slots__ = ("instruction_id", "tool_use_id", "reason")
+    INSTRUCTION_ID_FIELD_NUMBER: _ClassVar[int]
+    TOOL_USE_ID_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    instruction_id: str
+    tool_use_id: str
+    reason: str
+    def __init__(self, instruction_id: _Optional[str] = ..., tool_use_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class TextDelta(_message.Message):
     __slots__ = ("content",)
@@ -261,7 +273,7 @@ class ProxyToolInstruction(_message.Message):
     def __init__(self, instruction_id: _Optional[str] = ..., tool_use_id: _Optional[str] = ..., tool_name: _Optional[str] = ..., card: _Optional[_Union[InstructionCard, _Mapping]] = ...) -> None: ...
 
 class InstructionCard(_message.Message):
-    __slots__ = ("command", "target_environment", "expected_format", "hint", "timeout_seconds", "read_only", "parameters")
+    __slots__ = ("command", "target_environment", "expected_format", "hint", "timeout_seconds", "read_only", "parameters", "purpose")
     class ParametersEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -276,6 +288,7 @@ class InstructionCard(_message.Message):
     TIMEOUT_SECONDS_FIELD_NUMBER: _ClassVar[int]
     READ_ONLY_FIELD_NUMBER: _ClassVar[int]
     PARAMETERS_FIELD_NUMBER: _ClassVar[int]
+    PURPOSE_FIELD_NUMBER: _ClassVar[int]
     command: str
     target_environment: str
     expected_format: str
@@ -283,7 +296,8 @@ class InstructionCard(_message.Message):
     timeout_seconds: int
     read_only: bool
     parameters: _containers.ScalarMap[str, str]
-    def __init__(self, command: _Optional[str] = ..., target_environment: _Optional[str] = ..., expected_format: _Optional[str] = ..., hint: _Optional[str] = ..., timeout_seconds: _Optional[int] = ..., read_only: bool = ..., parameters: _Optional[_Mapping[str, str]] = ...) -> None: ...
+    purpose: str
+    def __init__(self, command: _Optional[str] = ..., target_environment: _Optional[str] = ..., expected_format: _Optional[str] = ..., hint: _Optional[str] = ..., timeout_seconds: _Optional[int] = ..., read_only: bool = ..., parameters: _Optional[_Mapping[str, str]] = ..., purpose: _Optional[str] = ...) -> None: ...
 
 class SkillMatch(_message.Message):
     __slots__ = ("skills",)

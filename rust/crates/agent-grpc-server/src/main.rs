@@ -1,5 +1,9 @@
+mod composite_executor;
 mod convert;
+mod instruction_card;
+mod local_executor;
 mod mock;
+mod proxy_executor;
 mod real_client;
 mod service;
 mod session_store;
