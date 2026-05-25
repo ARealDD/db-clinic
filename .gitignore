@@ -17,3 +17,12 @@ python/generated/
 .claw/sessions/
 .clawhip/
 status-help.txt
+
+# Local LLM config (contains API keys)
+eval/llm/config.local.yaml
+
+# Symlink to dba-bench test cases
+eval/cases
+
+# Evaluation run output
+eval/results/

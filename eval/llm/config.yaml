@@ -1,0 +1,11 @@
+# LLM API configuration for db-clinic evaluation.
+# Copy this file to config.local.yaml and fill in your keys.
+# config.local.yaml is git-ignored.
+#
+# The eval adapter reads this file and passes ApiConfig to the gRPC server
+# via CreateSession. If no config is found, the server falls back to mock mode.
+
+provider: "anthropic"       # anthropic | openai | dashscope | xai | custom
+api_key: ""                 # Your API key
+base_url: ""                # Optional base URL override (leave empty for default)
+model: ""                   # Model name (leave empty for provider default)
