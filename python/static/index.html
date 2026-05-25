@@ -16,7 +16,61 @@ header h1 { font-size: 18px; color: #e94560; }
 #status { font-size: 13px; color: #888; }
 #status.connected { color: #4ecca3; }
 #status.error { color: #e94560; }
+
+#main { flex: 1; display: flex; overflow: hidden; min-height: 0; }
 #chat { flex: 1; overflow-y: auto; padding: 16px 24px; display: flex; flex-direction: column; gap: 12px; }
+
+#tool-sidebar {
+  width: 340px; flex-shrink: 0; border-left: 1px solid #0f3460;
+  background: #141430; display: flex; flex-direction: column; overflow: hidden;
+}
+.sidebar-header {
+  padding: 10px 14px; font-size: 12px; font-weight: 600; letter-spacing: 0.5px;
+  color: #8888bb; text-transform: uppercase; background: #0f1a35;
+  border-bottom: 1px solid #0f3460; display: flex; justify-content: space-between; align-items: center;
+}
+.sidebar-header .count {
+  background: #0f3460; color: #4ecca3; padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0;
+}
+#tool-list { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+#tool-list .empty { color: #555; font-size: 12px; font-style: italic; text-align: center; padding: 16px 8px; }
+
+.tool-entry {
+  background: #1a1a2e; border: 1px solid #0f3460; border-radius: 6px;
+  font-size: 12px; overflow: hidden;
+}
+.tool-entry .te-header {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  cursor: pointer; user-select: none;
+}
+.tool-entry .te-header:hover { background: #1e1e3a; }
+.tool-entry .te-arrow { font-size: 9px; color: #666; transition: transform 0.15s; }
+.tool-entry.expanded .te-arrow { transform: rotate(90deg); }
+.tool-entry .te-name { flex: 1; font-family: "Cascadia Code", Consolas, monospace; color: #e0e0e0; }
+.tool-entry .te-status {
+  padding: 2px 7px; border-radius: 9px; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.3px; text-transform: uppercase;
+}
+.tool-entry .te-status[data-status="running"] { background: #16163a; color: #8888bb; }
+.tool-entry .te-status[data-status="ok"] { background: #1a3a2e; color: #4ecca3; }
+.tool-entry .te-status[data-status="error"],
+.tool-entry .te-status[data-status="fail"] { background: #3a1a1a; color: #e94560; }
+.tool-entry .te-output {
+  display: none; padding: 8px 10px; background: #0d1117; color: #cfd8e3;
+  font-family: "Cascadia Code", Consolas, monospace; font-size: 11px;
+  white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow-y: auto;
+  border-top: 1px solid #0f3460;
+}
+.tool-entry.expanded .te-output { display: block; }
+
+.toggle-btn {
+  padding: 4px 12px; background: transparent; color: #8888bb;
+  border: 1px solid #1a5296; border-radius: 14px; cursor: pointer;
+  font-size: 12px; font-family: inherit;
+}
+.toggle-btn:hover { background: #0f3460; color: #e0e0e0; }
+.toggle-btn.active { background: #e94560; border-color: #e94560; color: #fff; }
 
 .msg { max-width: 80%; padding: 10px 14px; border-radius: 10px; line-height: 1.6; word-break: break-word; font-size: 14px; }
 .msg.user { align-self: flex-end; background: #0f3460; color: #fff; border-bottom-right-radius: 2px; white-space: pre-wrap; }
@@ -137,6 +191,8 @@ header h1 { font-size: 18px; color: #e94560; }
 .proxy-card.expired { border-color: #666; opacity: 0.7; }
 .proxy-card.submitted { border-color: #4ecca3; }
 .proxy-card.expired .pc-badge { background: #666; }
+.proxy-card.archived { display: none; }
+body.show-proxy-history .proxy-card.archived { display: block; opacity: 0.65; }
 </style>
 </head>
 <body>
@@ -145,11 +201,21 @@ header h1 { font-size: 18px; color: #e94560; }
   <h1>DB Diagnosis Assistant</h1>
   <div style="display: flex; align-items: center; gap: 16px;">
     <span id="status">Connecting...</span>
+    <button id="toggle-proxy-history" class="toggle-btn" title="Show or hide submitted proxy instruction cards from past turns">Show proxy history</button>
     <a href="/static/settings.html" style="color: #4ecca3; text-decoration: none; font-size: 13px;">Settings</a>
   </div>
 </header>
 
-<div id="chat"></div>
+<div id="main">
+  <div id="chat"></div>
+  <aside id="tool-sidebar">
+    <div class="sidebar-header">
+      <span>Tool calls</span>
+      <span class="count" id="tool-count">0</span>
+    </div>
+    <div id="tool-list"><div class="empty">No tool calls yet.</div></div>
+  </aside>
+</div>
 
 <div id="input-area">
   <textarea id="user-input" rows="1" placeholder="Describe your database issue..." disabled></textarea>
@@ -172,6 +238,14 @@ const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('user-input');
 const sendBtn = document.getElementById('send-btn');
 const statusEl = document.getElementById('status');
+const toolListEl = document.getElementById('tool-list');
+const toolCountEl = document.getElementById('tool-count');
+const toggleHistoryBtn = document.getElementById('toggle-proxy-history');
+
+// tool_use_id -> { el, statusEl, outputEl } — lets us update a tool entry
+// in place when the matching "completed" / "failed" event arrives after the
+// initial "started", instead of appending a duplicate row.
+const toolEntries = new Map();
 
 let sessionId = null;
 let ws = null;
@@ -295,6 +369,55 @@ function renderProxyInstruction(msg) {
   scrollToBottom();
 }
 
+function renderToolExecution(msg) {
+  let entry = toolEntries.get(msg.tool_use_id);
+  if (!entry) {
+    const el = document.createElement('div');
+    el.className = 'tool-entry';
+    const header = document.createElement('div');
+    header.className = 'te-header';
+    const arrow = document.createElement('span');
+    arrow.className = 'te-arrow';
+    arrow.textContent = '▶';
+    const name = document.createElement('span');
+    name.className = 'te-name';
+    name.textContent = msg.tool_name || 'tool';
+    const status = document.createElement('span');
+    status.className = 'te-status';
+    const output = document.createElement('div');
+    output.className = 'te-output';
+    header.append(arrow, name, status);
+    el.append(header, output);
+    header.addEventListener('click', () => el.classList.toggle('expanded'));
+
+    // Drop the "no tool calls yet" placeholder on first insert.
+    const empty = toolListEl.querySelector('.empty');
+    if (empty) empty.remove();
+
+    toolListEl.appendChild(el);
+    entry = { el, statusEl: status, outputEl: output };
+    toolEntries.set(msg.tool_use_id, entry);
+    toolCountEl.textContent = toolEntries.size;
+  }
+  const statusLabel = msg.status === 'started'
+    ? 'running'
+    : msg.status === 'completed' ? (msg.is_error ? 'error' : 'ok')
+    : msg.status === 'failed' ? 'fail'
+    : msg.status;
+  entry.statusEl.textContent = statusLabel;
+  entry.statusEl.dataset.status = statusLabel;
+  if (msg.output) {
+    entry.outputEl.textContent = msg.output;
+    // Auto-expand failed/errored calls — the user almost always wants to see why.
+    if (statusLabel === 'fail' || statusLabel === 'error') {
+      entry.el.classList.add('expanded');
+    }
+  }
+  // Pin the sidebar to its newest entry. Sidebar volume is low, so an
+  // unconditional scroll is fine here.
+  toolListEl.scrollTop = toolListEl.scrollHeight;
+}
+
 function markProxyExpired(instructionId, reason) {
   const entry = proxyCards.get(instructionId);
   if (!entry) return;
@@ -316,8 +439,23 @@ function setStatus(text, cls) {
   statusEl.className = cls || '';
 }
 
-function scrollToBottom() {
-  chatEl.scrollTop = chatEl.scrollHeight;
+// Sticky-scroll state: true means new content keeps the view pinned to the
+// bottom. Flipped to false as soon as the user scrolls up to read; flipped back
+// to true when they scroll all the way down again. The scroll listener fires
+// on programmatic scrollTop writes too, so scrollToBottom() naturally re-arms
+// the flag without extra bookkeeping.
+let stickToBottom = true;
+const STICK_THRESHOLD_PX = 40;
+
+chatEl.addEventListener('scroll', () => {
+  const distance = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight;
+  stickToBottom = distance < STICK_THRESHOLD_PX;
+});
+
+function scrollToBottom(force) {
+  if (force || stickToBottom) {
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
 }
 
 function addMsg(text, cls) {
@@ -438,8 +576,12 @@ function finishThinking() {
     body.classList.remove('visible');
     const arrow = header.querySelector('.arrow');
     arrow.classList.remove('open');
-    isThinking = false;
   }
+  // Always clear refs so the next thinking_delta opens a fresh block —
+  // otherwise appendToThinking would keep writing into the collapsed one.
+  currentThinkingBlock = null;
+  currentThinkingBody = null;
+  isThinking = false;
 }
 
 async function createSession() {
@@ -501,21 +643,21 @@ function connectWebSocket() {
         markProxyExpired(msg.instruction_id, msg.reason);
         break;
       case 'tool_execution':
-        if (isThinking) finishThinking();
-        removeCursor();
-        if (msg.status === 'started') {
-          addMsg('tool: ' + msg.tool_name + ' (running...)', 'tool');
-        } else if (msg.status === 'completed' || msg.status === 'failed') {
-          const label = msg.status === 'failed' ? 'FAIL' : 'OK';
-          let text = label + ' tool: ' + msg.tool_name;
-          if (msg.output) text += '\n' + msg.output;
-          addMsg(text, 'tool');
-        }
+        // Tool results live in the right sidebar now — they were noisy in the
+        // main chat and pushed the actual answer out of view. The sidebar
+        // entry is updated in place across started → completed/failed.
+        renderToolExecution(msg);
         break;
       case 'turn_complete':
         if (isThinking) finishThinking();
         finalizeAssistant();
         removeCursor();
+        // The proxy cards from this turn have served their purpose — archive
+        // them so the final answer is what remains visible. Kept in the DOM
+        // and revealed by the "Show proxy history" toggle in the header.
+        for (const entry of proxyCards.values()) {
+          entry.card.classList.add('archived');
+        }
         currentAssistantMsg = null;
         currentAssistantRaw = '';
         currentThinkingBlock = null;
@@ -567,7 +709,9 @@ function sendMessage() {
   const text = inputEl.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
 
+  stickToBottom = true;
   addMsg(text, 'user');
+  scrollToBottom(true);
   ws.send(JSON.stringify({ type: 'user_message', content: text }));
   inputEl.value = '';
   inputEl.style.height = 'auto';
@@ -580,6 +724,12 @@ function sendMessage() {
   isThinking = false;
   proxyCards.clear();
 }
+
+toggleHistoryBtn.addEventListener('click', () => {
+  const on = document.body.classList.toggle('show-proxy-history');
+  toggleHistoryBtn.classList.toggle('active', on);
+  toggleHistoryBtn.textContent = on ? 'Hide proxy history' : 'Show proxy history';
+});
 
 sendBtn.addEventListener('click', sendMessage);
 inputEl.addEventListener('keydown', function(e) {
