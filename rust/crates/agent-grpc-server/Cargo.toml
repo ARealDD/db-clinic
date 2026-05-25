@@ -15,6 +15,7 @@ prost = "0.13"
 regex = "1"
 runtime = { path = "../runtime" }
 serde_json.workspace = true
+tools = { path = "../tools" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-stream = "0.1"
 tonic = "0.12"

@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -8,12 +9,22 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::convert;
 use crate::proto;
 use crate::proto::agent_service_server::AgentService;
-use crate::session_store::{ApiConfig, SessionManager};
+use crate::proxy_executor::{ProxyInstructionEvent, ProxyTimeoutEvent};
+use crate::session_store::{ApiConfig, ProxyChannels, SessionManager};
 use crate::skill_engine::SkillEngine;
+
+type ProxyReceivers = (
+    mpsc::Receiver<ProxyInstructionEvent>,
+    mpsc::Receiver<ProxyTimeoutEvent>,
+);
 
 pub struct AgentServiceImpl {
     manager: SessionManager,
     mock_mode: bool,
+    /// Holds the receiver ends of per-session proxy channels until the
+    /// matching `Chat` RPC connects and starts forwarding events to the
+    /// client.
+    pending_proxy_receivers: Arc<Mutex<HashMap<String, ProxyReceivers>>>,
 }
 
 impl AgentServiceImpl {
@@ -26,6 +37,7 @@ impl AgentServiceImpl {
         Self {
             manager: SessionManager::new(skill_engine),
             mock_mode,
+            pending_proxy_receivers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -65,14 +77,31 @@ impl AgentService for AgentServiceImpl {
             }
         });
 
+        let (instruction_tx, instruction_rx) = mpsc::channel::<ProxyInstructionEvent>(32);
+        let (timeout_tx, timeout_rx) = mpsc::channel::<ProxyTimeoutEvent>(8);
+        let proxy_channels = ProxyChannels {
+            instruction_tx,
+            timeout_tx,
+        };
+
         let manager = self.manager.clone();
         let mock_mode = self.mock_mode;
         let model_clone = model.clone();
         let (session_id, created_at_ms) = tokio::task::spawn_blocking(move || {
-            manager.create_session(model_clone, req.system_prompts, max_iterations, api_config)
+            manager.create_session(
+                model_clone,
+                req.system_prompts,
+                max_iterations,
+                api_config,
+                proxy_channels,
+            )
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+
+        if let Ok(mut guard) = self.pending_proxy_receivers.lock() {
+            guard.insert(session_id.clone(), (instruction_rx, timeout_rx));
+        }
 
         eprintln!("created session {session_id} (model={model}, mock={mock_mode})");
 
@@ -90,11 +119,25 @@ impl AgentService for AgentServiceImpl {
     ) -> Result<Response<Self::ChatStream>, Status> {
         let mut inbound = request.into_inner();
         let manager = self.manager.clone();
+        let pending_receivers = self.pending_proxy_receivers.clone();
         let (tx, rx) = mpsc::channel(64);
 
         tokio::spawn(async move {
+            let mut forwarders_started: HashMap<String, ()> = HashMap::new();
+
             while let Ok(Some(input)) = inbound.message().await {
                 let session_id = input.session_id.clone();
+
+                if !forwarders_started.contains_key(&session_id) {
+                    let receivers = pending_receivers
+                        .lock()
+                        .ok()
+                        .and_then(|mut g| g.remove(&session_id));
+                    if let Some((instr_rx, timeout_rx)) = receivers {
+                        spawn_forwarders(session_id.clone(), tx.clone(), instr_rx, timeout_rx);
+                        forwarders_started.insert(session_id.clone(), ());
+                    }
+                }
 
                 let Some(payload) = input.payload else {
                     let _ = tx
@@ -112,38 +155,54 @@ impl AgentService for AgentServiceImpl {
 
                 match payload {
                     proto::chat_input::Payload::UserMessage(user_msg) => {
-                        handle_user_message(&manager, &tx, &session_id, &user_msg).await;
+                        // Spawn the turn so the inbound loop keeps reading. If
+                        // we awaited here, a `ProxyResult` message sent by the
+                        // client *during* the turn would never be polled —
+                        // deadlocking the proxy-tool wait inside `run_turn`.
+                        let manager = manager.clone();
+                        let tx = tx.clone();
+                        let session_id = session_id.clone();
+                        tokio::spawn(async move {
+                            handle_user_message(&manager, &tx, &session_id, &user_msg).await;
+                        });
                     }
-                    proto::chat_input::Payload::ProxyResult(_proxy_result) => {
-                        let _ = tx
-                            .send(Ok(proto::ChatOutput {
-                                session_id,
-                                payload: Some(proto::chat_output::Payload::Error(
-                                    proto::ErrorEvent {
-                                        code: proto::ErrorCode::Unspecified.into(),
-                                        message: "proxy result handling not yet implemented"
-                                            .to_string(),
-                                        recoverable: true,
-                                    },
-                                )),
-                            }))
-                            .await;
+                    proto::chat_input::Payload::ProxyResult(proxy_result) => {
+                        let manager_clone = manager.clone();
+                        let sid = session_id.clone();
+                        let instruction_id = proxy_result.instruction_id.clone();
+                        let output = proxy_result.output.clone();
+                        let is_error = proxy_result.is_error;
+                        let delivered = tokio::task::spawn_blocking(move || {
+                            manager_clone
+                                .deliver_proxy_result(&sid, &instruction_id, output, is_error)
+                        })
+                        .await
+                        .unwrap_or(false);
+                        if !delivered {
+                            let _ = tx
+                                .send(Ok(proto::ChatOutput {
+                                    session_id: session_id.clone(),
+                                    payload: Some(proto::chat_output::Payload::Error(
+                                        proto::ErrorEvent {
+                                            code: proto::ErrorCode::ErrorInternal.into(),
+                                            message: format!(
+                                                "no pending proxy instruction `{}` for session `{}`",
+                                                proxy_result.instruction_id, session_id,
+                                            ),
+                                            recoverable: true,
+                                        },
+                                    )),
+                                }))
+                                .await;
+                        }
                     }
                     proto::chat_input::Payload::Cancel(_) => {
-                        let _ = tx
-                            .send(Ok(proto::ChatOutput {
-                                session_id,
-                                payload: Some(proto::chat_output::Payload::TurnComplete(
-                                    proto::TurnComplete {
-                                        messages: vec![],
-                                        turn_usage: None,
-                                        stop_reason: proto::TurnStopReason::TurnStopCancelled
-                                            .into(),
-                                    },
-                                )),
-                            }))
-                            .await;
-                        break;
+                        let manager_clone = manager.clone();
+                        let sid = session_id.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            manager_clone.cancel_turn(&sid)
+                        })
+                        .await;
                     }
                 }
             }
@@ -157,6 +216,17 @@ impl AgentService for AgentServiceImpl {
         request: Request<proto::CloseSessionRequest>,
     ) -> Result<Response<proto::CloseSessionResponse>, Status> {
         let session_id = request.into_inner().session_id;
+        if let Ok(mut guard) = self.pending_proxy_receivers.lock() {
+            guard.remove(&session_id);
+        }
+        // Cancel any in-flight turn *before* queueing commands. The session-
+        // manager thread may be blocked inside a proxy wait (up to 30 min); the
+        // cancel path flips an atomic via the shared map and bypasses
+        // `cmd_tx`, letting the runtime abort within one poll tick (~500 ms).
+        // Without this, the queued `GetUsage`/`Remove` below would back up
+        // behind the stuck turn — and any concurrent `Create` from a refreshed
+        // browser tab would queue behind those, freezing new sessions too.
+        self.manager.cancel_turn(&session_id);
         let manager = self.manager.clone();
         let sid = session_id.clone();
         let usage = tokio::task::spawn_blocking(move || {
@@ -185,6 +255,53 @@ impl AgentService for AgentServiceImpl {
             version: env!("CARGO_PKG_VERSION").to_string(),
         }))
     }
+}
+
+fn spawn_forwarders(
+    session_id: String,
+    tx: mpsc::Sender<Result<proto::ChatOutput, Status>>,
+    mut instr_rx: mpsc::Receiver<ProxyInstructionEvent>,
+    mut timeout_rx: mpsc::Receiver<ProxyTimeoutEvent>,
+) {
+    let instr_tx = tx.clone();
+    let instr_sid = session_id.clone();
+    tokio::spawn(async move {
+        while let Some(event) = instr_rx.recv().await {
+            let msg = proto::ChatOutput {
+                session_id: instr_sid.clone(),
+                payload: Some(proto::chat_output::Payload::ProxyInstruction(
+                    proto::ProxyToolInstruction {
+                        instruction_id: event.instruction_id,
+                        tool_use_id: event.tool_use_id,
+                        tool_name: event.tool_name,
+                        card: Some(event.card),
+                    },
+                )),
+            };
+            if instr_tx.send(Ok(msg)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let timeout_tx = tx;
+    tokio::spawn(async move {
+        while let Some(event) = timeout_rx.recv().await {
+            let msg = proto::ChatOutput {
+                session_id: session_id.clone(),
+                payload: Some(proto::chat_output::Payload::ProxyInstructionExpired(
+                    proto::ProxyInstructionExpired {
+                        instruction_id: event.instruction_id,
+                        tool_use_id: event.tool_use_id,
+                        reason: event.reason,
+                    },
+                )),
+            };
+            if timeout_tx.send(Ok(msg)).await.is_err() {
+                break;
+            }
+        }
+    });
 }
 
 #[allow(clippy::too_many_lines)]

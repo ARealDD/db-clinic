@@ -89,6 +89,54 @@ header h1 { font-size: 18px; color: #e94560; }
 .skill-badge.case { background: #0f3460; color: #6ec6ff; border: 1px solid #1a5296; }
 .skill-badge.knowledge { background: #1a3a2e; color: #4ecca3; border: 1px solid #2a6a4e; }
 .skill-badge .score { opacity: 0.6; font-size: 10px; }
+
+/* Proxy instruction card */
+.proxy-card {
+  align-self: stretch; max-width: 80%; align-self: flex-start;
+  background: #1e1e3a; border: 1px solid #e94560; border-radius: 10px;
+  padding: 12px 14px; font-size: 13px;
+}
+.proxy-card .pc-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.proxy-card .pc-badge { background: #e94560; color: #fff; font-size: 10px; padding: 2px 8px; border-radius: 10px; letter-spacing: 0.3px; }
+.proxy-card .pc-title { font-weight: 600; color: #fff; }
+.proxy-card .pc-meta { font-size: 11px; color: #888; margin-bottom: 8px; }
+.proxy-card .pc-purpose {
+  background: #16163a; border-left: 3px solid #4ecca3; border-radius: 4px;
+  padding: 8px 10px; margin-bottom: 8px; font-size: 12px; color: #cfd8e3;
+  line-height: 1.5;
+}
+.proxy-card .pc-purpose .pc-purpose-label {
+  display: block; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+  color: #4ecca3; text-transform: uppercase; margin-bottom: 3px;
+}
+.proxy-card .pc-cmd {
+  background: #0d1117; color: #e0e0e0; padding: 10px 12px; border-radius: 6px;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; margin-bottom: 8px;
+  border: 1px solid #0f3460;
+}
+.proxy-card .pc-hint { color: #aaa; font-size: 12px; margin-bottom: 10px; }
+.proxy-card textarea {
+  width: 100%; min-height: 80px; max-height: 240px; padding: 8px 10px;
+  background: #0d1117; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 6px;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace; font-size: 12px;
+  resize: vertical; outline: none;
+}
+.proxy-card textarea:focus { border-color: #e94560; }
+.proxy-card .pc-actions { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
+.proxy-card button {
+  padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
+  font-size: 12px; font-weight: 600;
+}
+.proxy-card .btn-submit { background: #4ecca3; color: #0d1117; }
+.proxy-card .btn-submit:hover { background: #3aa88a; }
+.proxy-card .btn-error { background: #e94560; color: #fff; }
+.proxy-card .btn-error:hover { background: #c73650; }
+.proxy-card button:disabled { background: #444; color: #888; cursor: not-allowed; }
+.proxy-card .pc-status { font-size: 11px; color: #888; }
+.proxy-card.expired { border-color: #666; opacity: 0.7; }
+.proxy-card.submitted { border-color: #4ecca3; }
+.proxy-card.expired .pc-badge { background: #666; }
 </style>
 </head>
 <body>
@@ -147,6 +195,120 @@ function addSkillBadges(skills) {
   }
   chatEl.appendChild(container);
   scrollToBottom();
+}
+
+const proxyCards = new Map();
+
+function renderProxyInstruction(msg) {
+  const card = document.createElement('div');
+  card.className = 'proxy-card';
+  card.dataset.instructionId = msg.instruction_id;
+
+  const header = document.createElement('div');
+  header.className = 'pc-header';
+  header.innerHTML =
+    '<span class="pc-badge">PROXY</span>' +
+    '<span class="pc-title">' + escapeHtml(msg.tool_name || 'tool') + '</span>';
+  card.appendChild(header);
+
+  const metaBits = [];
+  if (msg.target_environment) metaBits.push(escapeHtml(msg.target_environment));
+  if (msg.read_only) metaBits.push('read-only');
+  if (msg.timeout_seconds && msg.timeout_seconds > 0) metaBits.push('timeout ' + msg.timeout_seconds + 's');
+  if (metaBits.length) {
+    const meta = document.createElement('div');
+    meta.className = 'pc-meta';
+    meta.textContent = metaBits.join(' · ');
+    card.appendChild(meta);
+  }
+
+  if (msg.purpose) {
+    const purpose = document.createElement('div');
+    purpose.className = 'pc-purpose';
+    const label = document.createElement('span');
+    label.className = 'pc-purpose-label';
+    label.textContent = 'Agent purpose';
+    const body = document.createElement('span');
+    body.textContent = msg.purpose;
+    purpose.append(label, body);
+    card.appendChild(purpose);
+  }
+
+  const cmd = document.createElement('div');
+  cmd.className = 'pc-cmd';
+  cmd.textContent = msg.command || '(no command)';
+  card.appendChild(cmd);
+
+  if (msg.hint) {
+    const hint = document.createElement('div');
+    hint.className = 'pc-hint';
+    hint.textContent = msg.hint;
+    card.appendChild(hint);
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.placeholder = 'Paste the command output here — or, if rejecting, describe why and what the agent should do instead (e.g. "cancel, try another approach", "I can provide X, suggest a better option").';
+  card.appendChild(textarea);
+
+  const actions = document.createElement('div');
+  actions.className = 'pc-actions';
+  const submitBtn = document.createElement('button');
+  submitBtn.className = 'btn-submit';
+  submitBtn.textContent = 'Submit result';
+  const errorBtn = document.createElement('button');
+  errorBtn.className = 'btn-error';
+  errorBtn.textContent = 'Reject with feedback';
+  const status = document.createElement('span');
+  status.className = 'pc-status';
+  actions.append(submitBtn, errorBtn, status);
+  card.appendChild(actions);
+
+  const send = (isError) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      status.textContent = 'WebSocket disconnected';
+      return;
+    }
+    const output = textarea.value;
+    if (!output && !isError) {
+      status.textContent = 'Provide output text first';
+      return;
+    }
+    ws.send(JSON.stringify({
+      type: 'proxy_result',
+      instruction_id: msg.instruction_id,
+      tool_use_id: msg.tool_use_id || '',
+      output: output || (isError ? 'user rejected the instruction without further feedback' : ''),
+      is_error: !!isError,
+    }));
+    textarea.disabled = true;
+    submitBtn.disabled = true;
+    errorBtn.disabled = true;
+    card.classList.add('submitted');
+    status.textContent = isError ? 'Feedback sent — agent will adjust' : 'Result submitted';
+  };
+
+  submitBtn.addEventListener('click', () => send(false));
+  errorBtn.addEventListener('click', () => send(true));
+
+  proxyCards.set(msg.instruction_id, { card, textarea, submitBtn, errorBtn, status });
+  chatEl.appendChild(card);
+  scrollToBottom();
+}
+
+function markProxyExpired(instructionId, reason) {
+  const entry = proxyCards.get(instructionId);
+  if (!entry) return;
+  entry.card.classList.add('expired');
+  entry.textarea.disabled = true;
+  entry.submitBtn.disabled = true;
+  entry.errorBtn.disabled = true;
+  entry.status.textContent = 'Expired (' + (reason || 'timeout') + ') — turn cancelled';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
 }
 
 function setStatus(text, cls) {
@@ -330,6 +492,14 @@ function connectWebSocket() {
       case 'skill_match':
         addSkillBadges(msg.skills);
         break;
+      case 'proxy_instruction':
+        if (isThinking) finishThinking();
+        removeCursor();
+        renderProxyInstruction(msg);
+        break;
+      case 'proxy_instruction_expired':
+        markProxyExpired(msg.instruction_id, msg.reason);
+        break;
       case 'tool_execution':
         if (isThinking) finishThinking();
         removeCursor();
@@ -408,6 +578,7 @@ function sendMessage() {
   currentThinkingBlock = null;
   currentThinkingBody = null;
   isThinking = false;
+  proxyCards.clear();
 }
 
 sendBtn.addEventListener('click', sendMessage);
