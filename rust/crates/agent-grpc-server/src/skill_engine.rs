@@ -39,6 +39,10 @@ pub struct MatchedSkill {
     pub category: String,
     pub score: f32,
     pub skill_type: SkillType,
+    /// Short summary copied from the skill's frontmatter `description:` —
+    /// shown verbatim in the UI picker so the user can judge relevance
+    /// without opening the full file.
+    pub description: String,
 }
 
 pub struct SkillEngine {
@@ -256,6 +260,7 @@ impl SkillEngine {
                         category: skill.category.clone(),
                         score,
                         skill_type: skill.skill_type,
+                        description: skill.description.clone(),
                     })
                 } else {
                     None
@@ -270,6 +275,25 @@ impl SkillEngine {
         });
         scored.truncate(top_k);
         scored
+    }
+
+    /// Resolve a caller-supplied list of skill ids to `MatchedSkill` records.
+    /// Used by the user-driven picker path: the UI sends back which skills
+    /// the operator chose, and we trust that choice (score := 1.0). Unknown
+    /// ids are silently dropped. Output preserves the caller's order so
+    /// `build_context` reflects the operator's priority.
+    pub fn select_by_ids(&self, ids: &[&str]) -> Vec<MatchedSkill> {
+        ids.iter()
+            .filter_map(|id| self.skills.iter().find(|s| s.id == *id))
+            .map(|skill| MatchedSkill {
+                id: skill.id.clone(),
+                name: skill.name.clone(),
+                category: skill.category.clone(),
+                score: 1.0,
+                skill_type: skill.skill_type,
+                description: skill.description.clone(),
+            })
+            .collect()
     }
 
     fn score_case(skill: &LoadedSkill, context: &str) -> f32 {

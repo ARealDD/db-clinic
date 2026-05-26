@@ -306,18 +306,36 @@ class SkillMatch(_message.Message):
     def __init__(self, skills: _Optional[_Iterable[_Union[MatchedSkillInfo, _Mapping]]] = ...) -> None: ...
 
 class MatchedSkillInfo(_message.Message):
-    __slots__ = ("skill_id", "skill_name", "category", "score", "skill_type")
+    __slots__ = ("skill_id", "skill_name", "category", "score", "skill_type", "description")
     SKILL_ID_FIELD_NUMBER: _ClassVar[int]
     SKILL_NAME_FIELD_NUMBER: _ClassVar[int]
     CATEGORY_FIELD_NUMBER: _ClassVar[int]
     SCORE_FIELD_NUMBER: _ClassVar[int]
     SKILL_TYPE_FIELD_NUMBER: _ClassVar[int]
+    DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
     skill_id: str
     skill_name: str
     category: str
     score: float
     skill_type: str
-    def __init__(self, skill_id: _Optional[str] = ..., skill_name: _Optional[str] = ..., category: _Optional[str] = ..., score: _Optional[float] = ..., skill_type: _Optional[str] = ...) -> None: ...
+    description: str
+    def __init__(self, skill_id: _Optional[str] = ..., skill_name: _Optional[str] = ..., category: _Optional[str] = ..., score: _Optional[float] = ..., skill_type: _Optional[str] = ..., description: _Optional[str] = ...) -> None: ...
+
+class PreviewSkillsRequest(_message.Message):
+    __slots__ = ("session_id", "text", "top_k")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    TOP_K_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    text: str
+    top_k: int
+    def __init__(self, session_id: _Optional[str] = ..., text: _Optional[str] = ..., top_k: _Optional[int] = ...) -> None: ...
+
+class PreviewSkillsResponse(_message.Message):
+    __slots__ = ("matches",)
+    MATCHES_FIELD_NUMBER: _ClassVar[int]
+    matches: _containers.RepeatedCompositeFieldContainer[MatchedSkillInfo]
+    def __init__(self, matches: _Optional[_Iterable[_Union[MatchedSkillInfo, _Mapping]]] = ...) -> None: ...
 
 class TurnComplete(_message.Message):
     __slots__ = ("messages", "turn_usage", "stop_reason")

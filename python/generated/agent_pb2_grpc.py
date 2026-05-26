@@ -58,6 +58,11 @@ class AgentServiceStub(object):
                 request_serializer=agent__pb2.HealthCheckRequest.SerializeToString,
                 response_deserializer=agent__pb2.HealthCheckResponse.FromString,
                 _registered_method=True)
+        self.PreviewSkills = channel.unary_unary(
+                '/agent.AgentService/PreviewSkills',
+                request_serializer=agent__pb2.PreviewSkillsRequest.SerializeToString,
+                response_deserializer=agent__pb2.PreviewSkillsResponse.FromString,
+                _registered_method=True)
 
 
 class AgentServiceServicer(object):
@@ -97,6 +102,15 @@ class AgentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def PreviewSkills(self, request, context):
+        """Stateless preview of skill matches for a draft user message. Used by the
+        UI to render a picker BEFORE sending the actual user_message — selected
+        skill ids are then carried back via UserMessage.context attachments.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AgentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -119,6 +133,11 @@ def add_AgentServiceServicer_to_server(servicer, server):
                     servicer.HealthCheck,
                     request_deserializer=agent__pb2.HealthCheckRequest.FromString,
                     response_serializer=agent__pb2.HealthCheckResponse.SerializeToString,
+            ),
+            'PreviewSkills': grpc.unary_unary_rpc_method_handler(
+                    servicer.PreviewSkills,
+                    request_deserializer=agent__pb2.PreviewSkillsRequest.FromString,
+                    response_serializer=agent__pb2.PreviewSkillsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -233,6 +252,33 @@ class AgentService(object):
             '/agent.AgentService/HealthCheck',
             agent__pb2.HealthCheckRequest.SerializeToString,
             agent__pb2.HealthCheckResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PreviewSkills(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/agent.AgentService/PreviewSkills',
+            agent__pb2.PreviewSkillsRequest.SerializeToString,
+            agent__pb2.PreviewSkillsResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -23,6 +23,11 @@ service AgentService {
 
   // Health check for load balancer / connection pool.
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Stateless preview of skill matches for a draft user message. Used by the
+  // UI to render a picker BEFORE sending the actual user_message — selected
+  // skill ids are then carried back via UserMessage.context attachments.
+  rpc PreviewSkills(PreviewSkillsRequest) returns (PreviewSkillsResponse);
 }
 
 // ============================================================================
@@ -255,6 +260,26 @@ message MatchedSkillInfo {
   string category = 3;
   float score = 4;
   string skill_type = 5;
+  // Short summary (typically the frontmatter `description`) shown in the
+  // UI picker. May be empty when the skill file omits it.
+  string description = 6;
+}
+
+// ============================================================================
+// Skill Preview (stateless)
+// ============================================================================
+
+message PreviewSkillsRequest {
+  // Optional — included only for log correlation; the call itself is stateless.
+  string session_id = 1;
+  // Draft text the user is about to send.
+  string text = 2;
+  // Cap on how many candidates to return. 0 → server default (8).
+  uint32 top_k = 3;
+}
+
+message PreviewSkillsResponse {
+  repeated MatchedSkillInfo matches = 1;
 }
 
 message TurnComplete {

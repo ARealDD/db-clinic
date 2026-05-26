@@ -193,6 +193,36 @@ header h1 { font-size: 18px; color: #e94560; }
 .proxy-card.expired .pc-badge { background: #666; }
 .proxy-card.archived { display: none; }
 body.show-proxy-history .proxy-card.archived { display: block; opacity: 0.65; }
+
+.skill-picker {
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid #2a3340;
+  border-radius: 8px;
+  background: #161d27;
+  color: #d0d7de;
+}
+.skill-picker h4 { margin: 0 0 4px; font-size: 13px; color: #4ecca3; }
+.skill-picker .picker-help { font-size: 11px; color: #8b949e; margin-bottom: 8px; }
+.skill-picker .skill-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 4px; border-bottom: 1px solid #222b38;
+}
+.skill-picker .skill-row:last-of-type { border-bottom: none; }
+.skill-picker .skill-row.disabled label { opacity: 0.4; cursor: not-allowed; }
+.skill-picker label { flex: 1; cursor: pointer; line-height: 1.4; }
+.skill-picker .skill-name { font-weight: 600; color: #e6edf3; }
+.skill-picker .skill-meta { font-size: 10px; color: #8b949e; margin-left: 6px; }
+.skill-picker .skill-desc { font-size: 12px; color: #8b949e; margin-top: 2px; }
+.skill-picker .picker-actions { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+.skill-picker button {
+  padding: 6px 14px; border-radius: 4px; border: none; cursor: pointer; font-size: 12px;
+}
+.skill-picker .btn-send { background: #4ecca3; color: #0d1117; font-weight: 600; }
+.skill-picker .btn-send:hover { background: #3aa88a; }
+.skill-picker .btn-cancel { background: #444; color: #ddd; }
+.skill-picker .btn-cancel:hover { background: #555; }
+.skill-picker .picker-status { font-size: 11px; color: #8b949e; margin-left: auto; }
 </style>
 </head>
 <body>
@@ -705,14 +735,140 @@ function connectWebSocket() {
   };
 }
 
-function sendMessage() {
+async function sendMessage() {
   const text = inputEl.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  // Phase 1: ask the kernel which skills match. Stateless REST call — does
+  // NOT touch the active gRPC chat stream.
+  inputEl.disabled = true;
+  sendBtn.disabled = true;
+  let matches = [];
+  try {
+    const r = await fetch('/api/preview_skills', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, text, top_k: 8 }),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      matches = data.matches || [];
+    }
+  } catch (e) {
+    console.warn('preview_skills failed; sending with zero skills', e);
+  }
+
+  if (matches.length === 0) {
+    // No candidates → no picker. Send straight through with no selection
+    // marker, so the kernel treats it as a "no skills needed" turn.
+    finalizeSend(text, []);
+    return;
+  }
+
+  renderSkillPicker(text, matches);
+}
+
+function renderSkillPicker(text, matches) {
+  const picker = document.createElement('div');
+  picker.className = 'skill-picker';
+  const header = document.createElement('h4');
+  header.textContent = 'Choose up to 3 skills to inject into the prompt';
+  picker.appendChild(header);
+  const help = document.createElement('div');
+  help.className = 'picker-help';
+  help.textContent = 'Pick the cases/knowledge most relevant to your question. Leave all unchecked to send with no skill context.';
+  picker.appendChild(help);
+
+  const MAX = 3;
+  const checkboxes = [];
+
+  matches.forEach((m, idx) => {
+    const row = document.createElement('div');
+    row.className = 'skill-row';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = m.id;
+    cb.id = 'skill-pick-' + idx;
+    const label = document.createElement('label');
+    label.setAttribute('for', cb.id);
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'skill-name';
+    nameSpan.textContent = m.name;
+    const meta = document.createElement('span');
+    meta.className = 'skill-meta';
+    meta.textContent = '[' + m.type + ' · ' + m.category + ' · ' + m.score + ']';
+    label.appendChild(nameSpan);
+    label.appendChild(meta);
+    if (m.description) {
+      const desc = document.createElement('div');
+      desc.className = 'skill-desc';
+      desc.textContent = m.description;
+      label.appendChild(desc);
+    }
+    row.appendChild(cb);
+    row.appendChild(label);
+    picker.appendChild(row);
+    checkboxes.push({ cb, row });
+  });
+
+  const status = document.createElement('span');
+  status.className = 'picker-status';
+  status.textContent = '0 / ' + MAX + ' selected';
+
+  function refreshCap() {
+    const checkedCount = checkboxes.filter(c => c.cb.checked).length;
+    status.textContent = checkedCount + ' / ' + MAX + ' selected';
+    checkboxes.forEach(c => {
+      const atCap = checkedCount >= MAX && !c.cb.checked;
+      c.cb.disabled = atCap;
+      c.row.classList.toggle('disabled', atCap);
+    });
+  }
+  checkboxes.forEach(c => c.cb.addEventListener('change', refreshCap));
+
+  const actions = document.createElement('div');
+  actions.className = 'picker-actions';
+  const sendNow = document.createElement('button');
+  sendNow.className = 'btn-send';
+  sendNow.textContent = 'Send';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-cancel';
+  cancel.textContent = 'Cancel';
+  actions.appendChild(sendNow);
+  actions.appendChild(cancel);
+  actions.appendChild(status);
+  picker.appendChild(actions);
+
+  chatEl.appendChild(picker);
+  scrollToBottom(true);
+
+  sendNow.addEventListener('click', () => {
+    const selectedIds = checkboxes.filter(c => c.cb.checked).map(c => c.cb.value);
+    picker.remove();
+    finalizeSend(text, selectedIds);
+  });
+  cancel.addEventListener('click', () => {
+    picker.remove();
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+    inputEl.value = text;
+    inputEl.focus();
+  });
+}
+
+function finalizeSend(text, selectedIds) {
+  // Marker attachment is ALWAYS present once the user passes through the
+  // picker — even when they pick zero skills. Its presence is what tells the
+  // server "skip auto-top-3, this is a UI-decided turn".
+  const context = [{ source: 'skill_selection', content: '' }];
+  for (const id of selectedIds) {
+    context.push({ source: 'selected_skill', content: id });
+  }
 
   stickToBottom = true;
   addMsg(text, 'user');
   scrollToBottom(true);
-  ws.send(JSON.stringify({ type: 'user_message', content: text }));
+  ws.send(JSON.stringify({ type: 'user_message', content: text, context }));
   inputEl.value = '';
   inputEl.style.height = 'auto';
   inputEl.disabled = true;

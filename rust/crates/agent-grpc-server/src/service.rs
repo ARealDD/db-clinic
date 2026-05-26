@@ -18,6 +18,16 @@ type ProxyReceivers = (
     mpsc::Receiver<ProxyTimeoutEvent>,
 );
 
+/// Sentinel `ContextAttachment.source` value set by the frontend whenever the
+/// user has reviewed the skill picker — even if they unchecked everything.
+/// Its presence (regardless of whether any `SELECTED_SKILL_SOURCE` rows
+/// follow) tells the kernel "do NOT run auto-top-3, the operator already
+/// decided."
+const SKILL_SELECTION_MARKER: &str = "skill_selection";
+/// `ContextAttachment.source` for each individual selected skill row. The
+/// attachment's `content` is the skill id.
+const SELECTED_SKILL_SOURCE: &str = "selected_skill";
+
 pub struct AgentServiceImpl {
     manager: SessionManager,
     mock_mode: bool,
@@ -173,8 +183,12 @@ impl AgentService for AgentServiceImpl {
                         let output = proxy_result.output.clone();
                         let is_error = proxy_result.is_error;
                         let delivered = tokio::task::spawn_blocking(move || {
-                            manager_clone
-                                .deliver_proxy_result(&sid, &instruction_id, output, is_error)
+                            manager_clone.deliver_proxy_result(
+                                &sid,
+                                &instruction_id,
+                                output,
+                                is_error,
+                            )
                         })
                         .await
                         .unwrap_or(false);
@@ -199,10 +213,9 @@ impl AgentService for AgentServiceImpl {
                     proto::chat_input::Payload::Cancel(_) => {
                         let manager_clone = manager.clone();
                         let sid = session_id.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            manager_clone.cancel_turn(&sid)
-                        })
-                        .await;
+                        let _ =
+                            tokio::task::spawn_blocking(move || manager_clone.cancel_turn(&sid))
+                                .await;
                     }
                 }
             }
@@ -254,6 +267,37 @@ impl AgentService for AgentServiceImpl {
             uptime_seconds: self.manager.uptime_seconds(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }))
+    }
+
+    async fn preview_skills(
+        &self,
+        request: Request<proto::PreviewSkillsRequest>,
+    ) -> Result<Response<proto::PreviewSkillsResponse>, Status> {
+        let req = request.into_inner();
+        let text = req.text;
+        let top_k = if req.top_k == 0 {
+            8
+        } else {
+            req.top_k as usize
+        };
+        let engine = Arc::clone(self.manager.skill_engine());
+        let matched = tokio::task::spawn_blocking(move || engine.match_skills(&text, top_k))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(proto::PreviewSkillsResponse {
+            matches: matched.iter().map(matched_skill_to_proto).collect(),
+        }))
+    }
+}
+
+fn matched_skill_to_proto(m: &crate::skill_engine::MatchedSkill) -> proto::MatchedSkillInfo {
+    proto::MatchedSkillInfo {
+        skill_id: m.id.clone(),
+        skill_name: m.name.clone(),
+        category: m.category.clone(),
+        score: m.score,
+        skill_type: m.skill_type.as_str().to_string(),
+        description: m.description.clone(),
     }
 }
 
@@ -314,25 +358,45 @@ async fn handle_user_message(
     let user_text = user_msg.content.clone();
     let skill_engine = Arc::clone(manager.skill_engine());
 
-    let user_text_for_match = user_text.clone();
-    let matched =
+    // UI path: the frontend has already shown a picker and recorded the
+    // operator's choice as `ContextAttachment`s on the user_message. CLI path:
+    // no marker → fall back to legacy auto-top-3 so rusty-claude-cli stays
+    // unchanged.
+    let has_selection_marker = user_msg
+        .context
+        .iter()
+        .any(|a| a.source == SKILL_SELECTION_MARKER);
+
+    let matched = if has_selection_marker {
+        let ids: Vec<String> = user_msg
+            .context
+            .iter()
+            .filter(|a| a.source == SELECTED_SKILL_SOURCE)
+            .map(|a| a.content.clone())
+            .collect();
+        if ids.is_empty() {
+            // Explicit "zero skills" — user reviewed and dismissed all matches.
+            Vec::new()
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                skill_engine.select_by_ids(&refs)
+            })
+            .await
+            .unwrap_or_default()
+        }
+    } else {
+        let user_text_for_match = user_text.clone();
         tokio::task::spawn_blocking(move || skill_engine.match_skills(&user_text_for_match, 3))
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+    };
 
     let skill_context = if matched.is_empty() {
         None
     } else {
-        let proto_skills: Vec<proto::MatchedSkillInfo> = matched
-            .iter()
-            .map(|m| proto::MatchedSkillInfo {
-                skill_id: m.id.clone(),
-                skill_name: m.name.clone(),
-                category: m.category.clone(),
-                score: m.score,
-                skill_type: m.skill_type.as_str().to_string(),
-            })
-            .collect();
+        let proto_skills: Vec<proto::MatchedSkillInfo> =
+            matched.iter().map(matched_skill_to_proto).collect();
 
         let _ = tx
             .send(Ok(proto::ChatOutput {

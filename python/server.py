@@ -121,6 +121,38 @@ async def health():
         return {"status": "unavailable", "error": str(e)}
 
 
+@app.post("/api/preview_skills")
+async def preview_skills(payload: dict):
+    """Stateless preview: ask the Rust kernel which skills would match a draft
+    message so the UI can render a picker before the user actually sends it."""
+    session_id = payload.get("session_id", "")
+    text = payload.get("text", "")
+    top_k = int(payload.get("top_k", 8))
+    try:
+        with _grpc_channel() as ch:
+            stub = agent_pb2_grpc.AgentServiceStub(ch)
+            resp = stub.PreviewSkills(
+                agent_pb2.PreviewSkillsRequest(
+                    session_id=session_id, text=text, top_k=top_k
+                )
+            )
+        return {
+            "matches": [
+                {
+                    "id": m.skill_id,
+                    "name": m.skill_name,
+                    "category": m.category,
+                    "score": round(m.score, 1),
+                    "type": m.skill_type,
+                    "description": m.description,
+                }
+                for m in resp.matches
+            ]
+        }
+    except grpc.RpcError as e:
+        return {"matches": [], "error": str(e)}
+
+
 # ---------- WebSocket chat ----------
 
 class _ChatInputIterator:
@@ -222,6 +254,7 @@ def _chat_output_to_json(out: agent_pb2.ChatOutput) -> dict | None:
                     "category": s.category,
                     "score": round(s.score, 1),
                     "type": s.skill_type,
+                    "description": s.description,
                 }
                 for s in out.skill_match.skills
             ],
@@ -283,9 +316,22 @@ async def ws_chat(ws: WebSocket, session_id: str):
             msg_type = data.get("type", "")
             if msg_type == "user_message":
                 content = data.get("content", "")
-                log.info("session %s: user_message len=%d", session_id, len(content))
+                context_attachments = data.get("context") or []
+                log.info(
+                    "session %s: user_message len=%d context=%d",
+                    session_id, len(content), len(context_attachments),
+                )
+                proto_attachments = [
+                    agent_pb2.ContextAttachment(
+                        source=str(a.get("source", "")),
+                        content=str(a.get("content", "")),
+                    )
+                    for a in context_attachments
+                ]
                 chat_input = agent_pb2.ChatInput(session_id=session_id)
-                chat_input.user_message.CopyFrom(agent_pb2.UserMessage(content=content))
+                chat_input.user_message.CopyFrom(
+                    agent_pb2.UserMessage(content=content, context=proto_attachments)
+                )
                 input_iter.put(chat_input)
             elif msg_type == "cancel":
                 chat_input = agent_pb2.ChatInput(session_id=session_id)
