@@ -29,3 +29,7 @@ tests/cases
 
 # Evaluation run output
 tests/results/
+
+# SQLite metadatabase (auto-created at startup)
+python/data/
+*.db

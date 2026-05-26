@@ -1,4 +1,9 @@
+# -*- coding: utf-8 -*-
+"""FastAPI gateway for DB Diagnosis Assistant — Python 3.9 compatible."""
+from __future__ import annotations
+
 import sys, os, json, queue, threading, logging
+from typing import Optional, Dict, Any
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "generated"))
@@ -8,10 +13,15 @@ import grpc
 import agent_pb2
 import agent_pb2_grpc
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+
+import auth as auth_mod
+import db
+from models import UserRegister, UserLogin, TokenResponse, UserResponse, LLMConfig
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("gateway")
@@ -20,23 +30,114 @@ GRPC_ADDR = os.environ.get("GRPC_ADDR", "localhost:50051")
 
 app = FastAPI(title="Agent Gateway")
 
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    log.error("unhandled exception on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+@app.on_event("startup")
+async def _startup_init_db():
+    await db.init_db()
+
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+
+# ---------- Auth helpers ----------
+
+_bearer_scheme = HTTPBearer()
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+) -> Dict[str, Any]:
+    """FastAPI dependency that extracts and validates the JWT bearer token."""
+    payload = auth_mod.decode_access_token(credentials.credentials)
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+    user_id = payload.get("sub")
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token missing subject",
+        )
+    user = await db.get_user_by_id(int(user_id))
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    return user
 
 
 def _grpc_channel():
     return grpc.insecure_channel(GRPC_ADDR)
 
 
-# ---------- In-memory LLM config ----------
+# ---------- Auth endpoints ----------
 
-class LLMConfig(BaseModel):
-    provider: str = ""
-    api_key: str = ""
-    base_url: str = ""
-    model: str = ""
-    system_prompt: str = "You are a database diagnosis assistant."
+@app.post("/api/auth/register", response_model=TokenResponse)
+async def register(body: UserRegister):
+    existing = await db.get_user_by_username(body.username)
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username already exists",
+        )
+    hashed = auth_mod.hash_password(body.password)
+    user_id = await db.create_user(body.username, hashed)
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create user",
+        )
+    token = auth_mod.create_access_token({"sub": str(user_id)})
+    log.info("registered user %s (id=%s)", body.username, user_id)
+    return TokenResponse(access_token=token)
 
-_current_config = LLMConfig()
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+async def login(body: UserLogin):
+    user = await db.get_user_by_username(body.username)
+    if user is None or not auth_mod.verify_password(body.password, user["hashed_pw"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+        )
+    token = auth_mod.create_access_token({"sub": str(user["id"])})
+    log.info("logged in user %s (id=%s)", user["username"], user["id"])
+    return TokenResponse(access_token=token)
+
+
+@app.get("/api/auth/me", response_model=UserResponse)
+async def me(current_user: Dict[str, Any] = Depends(get_current_user)):
+    return UserResponse(id=current_user["id"], username=current_user["username"])
+
+
+# ---------- Per-user LLM config ----------
+
+async def _get_user_llm_config(user_id: int) -> LLMConfig:
+    """Load the LLM config for a given user from the database."""
+    configs = await db.get_all_user_configs(user_id)
+    return LLMConfig(
+        provider=configs.get("llm_provider", ""),
+        api_key=configs.get("llm_api_key", ""),
+        base_url=configs.get("llm_base_url", ""),
+        model=configs.get("llm_model", ""),
+        system_prompt=configs.get("llm_system_prompt", "You are a database diagnosis assistant."),
+    )
+
+
+async def _save_user_llm_config(user_id: int, config: LLMConfig) -> None:
+    """Save the LLM config for a given user to the database."""
+    await db.set_user_config(user_id, "llm_provider", config.provider)
+    await db.set_user_config(user_id, "llm_api_key", config.api_key)
+    await db.set_user_config(user_id, "llm_base_url", config.base_url)
+    await db.set_user_config(user_id, "llm_model", config.model)
+    await db.set_user_config(user_id, "llm_system_prompt", config.system_prompt)
 
 
 # ---------- REST endpoints ----------
@@ -46,37 +147,52 @@ async def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
 
 
+@app.get("/login")
+async def login_page():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "login.html"))
+
+
 @app.post("/api/config")
-async def set_config(config: LLMConfig):
-    global _current_config
-    _current_config = config
-    log.info("config updated: provider=%s model=%s base_url=%s", config.provider, config.model, config.base_url)
+async def set_config(
+    config: LLMConfig,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    await _save_user_llm_config(current_user["id"], config)
+    log.info(
+        "config updated for user %s: provider=%s model=%s base_url=%s",
+        current_user["username"], config.provider, config.model, config.base_url,
+    )
     return {"ok": True}
 
 
 @app.get("/api/config")
-async def get_config():
+async def get_config(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    config = await _get_user_llm_config(current_user["id"])
     return {
-        "provider": _current_config.provider,
-        "model": _current_config.model,
-        "base_url": _current_config.base_url,
-        "system_prompt": _current_config.system_prompt,
-        "has_api_key": bool(_current_config.api_key),
+        "provider": config.provider,
+        "model": config.model,
+        "base_url": config.base_url,
+        "system_prompt": config.system_prompt,
+        "has_api_key": bool(config.api_key),
     }
 
 
 @app.post("/api/sessions")
-async def create_session():
-    cfg = _current_config
-    model = cfg.model or "mock"
-    system_prompt = cfg.system_prompt or "You are a database diagnosis assistant."
+async def create_session(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    config = await _get_user_llm_config(current_user["id"])
+    model = config.model or "mock"
+    system_prompt = config.system_prompt or "You are a database diagnosis assistant."
 
     api_config = None
-    if cfg.api_key:
+    if config.api_key:
         api_config = agent_pb2.ApiConfig(
-            provider=cfg.provider,
-            api_key=cfg.api_key,
-            base_url=cfg.base_url,
+            provider=config.provider,
+            api_key=config.api_key,
+            base_url=config.base_url,
         )
 
     with _grpc_channel() as ch:
@@ -86,7 +202,8 @@ async def create_session():
             system_prompts=[system_prompt],
             api_config=api_config,
         ))
-    log.info("created session %s (model=%s, has_api_config=%s)", resp.session_id, model, api_config is not None)
+    log.info("created session %s (model=%s, has_api_config=%s, user=%s)",
+             resp.session_id, model, api_config is not None, current_user["username"])
     return {"session_id": resp.session_id, "created_at_ms": resp.created_at_ms}
 
 
@@ -179,7 +296,7 @@ class _ChatInputIterator:
         return item
 
 
-def _chat_output_to_json(out: agent_pb2.ChatOutput) -> dict | None:
+def _chat_output_to_json(out: agent_pb2.ChatOutput) -> Optional[Dict[str, Any]]:
     field = out.WhichOneof("payload")
     if field == "text_delta":
         return {"type": "text_delta", "content": out.text_delta.content}
@@ -264,8 +381,23 @@ def _chat_output_to_json(out: agent_pb2.ChatOutput) -> dict | None:
 
 @app.websocket("/ws/chat/{session_id}")
 async def ws_chat(ws: WebSocket, session_id: str):
+    token = ws.query_params.get("token", "")
+    payload = auth_mod.decode_access_token(token)
+    if payload is None:
+        await ws.close(code=4001, reason="Invalid or missing token")
+        log.warning("ws rejected: no/invalid token for session %s", session_id)
+        return
+    user_id = payload.get("sub")
+    if user_id is None:
+        await ws.close(code=4001, reason="Token missing subject")
+        return
+    user = await db.get_user_by_id(int(user_id))
+    if user is None:
+        await ws.close(code=4001, reason="User not found")
+        return
+
     await ws.accept()
-    log.info("ws connected for session %s", session_id)
+    log.info("ws connected for session %s (user=%s)", session_id, user["username"])
 
     ch = grpc.insecure_channel(GRPC_ADDR)
     stub = agent_pb2_grpc.AgentServiceStub(ch)

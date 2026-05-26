@@ -23,7 +23,7 @@ RUN apt-get update \
 # Install Python dependencies for FastAPI gateway
 RUN pip3 install --no-cache-dir \
       grpcio grpcio-tools fastapi uvicorn pydantic PyYAML \
-      aiosqlite python-jose passlib bcrypt cryptography
+      aiosqlite python-jose bcrypt cryptography
 
 ENV CARGO_TERM_COLOR=always
 WORKDIR /workspace
