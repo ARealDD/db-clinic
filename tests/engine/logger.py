@@ -30,9 +30,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from eval.engine.runner import CaseRunResult
-    from eval.engine.metrics import SuiteResult
-    from eval.engine.schema import BenchmarkCase
+    from tests.engine.runner import CaseRunResult
+    from tests.engine.metrics import SuiteResult
+    from tests.engine.schema import BenchmarkCase
 
 
 class InteractionLogger:

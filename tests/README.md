@@ -1,11 +1,11 @@
 # db-clinic Evaluation
 
-End-to-end evaluation of the db-clinic diagnostic agent. The evaluation engine (`eval/engine/`) is self-contained — no external dba-bench dependency.
+End-to-end evaluation of the db-clinic diagnostic agent. The evaluation engine (`tests/engine/`) is self-contained — no external dba-bench dependency.
 
 ## Directory Structure
 
 ```
-eval/
+tests/
   engine/                 # Evaluation core (self-contained)
     __init__.py            # Public API
     __main__.py            # python -m eval.engine entry point
@@ -35,14 +35,14 @@ eval/
 ### 1. Install Python dependencies
 
 ```bash
-pip install -r eval/requirements.txt
+pip install -r tests/requirements.txt
 ```
 
 ### 2. Configure LLM API
 
 ```bash
-cp eval/llm/config.yaml eval/llm/config.local.yaml
-# Edit eval/llm/config.local.yaml with your API key and model
+cp tests/llm/config.yaml tests/llm/config.local.yaml
+# Edit tests/llm/config.local.yaml with your API key and model
 ```
 
 Supported providers: `anthropic`, `openai`, `custom`, `xai`, `dashscope`.
@@ -76,7 +76,7 @@ cd ..
 #### One-command (build + start server + run eval)
 
 ```bash
-eval/run_eval.sh
+tests/run_eval.sh
 ```
 
 #### Manual (two terminals)
@@ -92,10 +92,10 @@ Terminal 2 — run the evaluation:
 
 ```bash
 # From repo root
-python -m eval.engine --cases eval/cases --output eval/results
+python -m eval.engine --cases tests/cases --output tests/results
 
 # Or from any directory
-eval/eval.sh --cases eval/cases --output eval/results
+tests/eval.sh --cases tests/cases --output tests/results
 ```
 
 ## Approach 2: Direct Rust Agent (no gRPC)
@@ -127,17 +127,17 @@ The Python adapter auto-discovers the binary at `rust/target/debug/agent-eval`.
 #### One-command (build + run eval)
 
 ```bash
-eval/run_eval.sh --direct
+tests/run_eval.sh --direct
 ```
 
 #### Manual
 
 ```bash
 # From repo root
-python -m eval.engine --direct --cases eval/cases --output eval/results
+python -m eval.engine --direct --cases tests/cases --output tests/results
 
 # From any directory
-eval/eval.sh --direct --cases eval/cases --output eval/results
+tests/eval.sh --direct --cases tests/cases --output tests/results
 ```
 
 ### What's different from the gRPC path
@@ -154,14 +154,14 @@ eval/eval.sh --direct --cases eval/cases --output eval/results
 
 ```bash
 # Single case
-eval/run_eval.sh --case case_ops_023.yaml
-eval/run_eval.sh --direct --case case_ops_023.yaml
+tests/run_eval.sh --case case_ops_023.yaml
+tests/run_eval.sh --direct --case case_ops_023.yaml
 
 # Custom cases directory
-eval/run_eval.sh --cases /path/to/cases
+tests/run_eval.sh --cases /path/to/cases
 
 # Dry run (matcher only, no LLM calls)
-eval/run_eval.sh --dry-run
+tests/run_eval.sh --dry-run
 ```
 
 ## Test Cases
@@ -174,7 +174,7 @@ Each case is a YAML file defining:
 
 ## Results
 
-Results are written to `eval/results/run_<timestamp>/`:
+Results are written to `tests/results/run_<timestamp>/`:
 
 - `<case_id>.json` — per-case detailed results
 - `summary.json` — aggregate metrics

@@ -2,8 +2,6 @@
 
 A high-performance Rust rewrite of the Claw Code CLI agent harness. Built for speed, safety, and native tool execution.
 
-For a task-oriented guide with copy/paste examples, see [`../USAGE.md`](../USAGE.md).
-
 ## Quick Start
 
 ```bash
@@ -173,7 +171,7 @@ Notable claw-first surfaces now available directly in slash form:
 - `/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]`
 - `/subagent [list|steer <target> <msg>|kill <id>]`
 
-See [`../USAGE.md`](../USAGE.md) for usage examples and run `cargo run -p rusty-claude-cli -- --help` for the live canonical command list.
+Run `cargo run -p rusty-claude-cli -- --help` for the live canonical command list.
 
 ## Workspace Layout
 

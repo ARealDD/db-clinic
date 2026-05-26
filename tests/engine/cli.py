@@ -2,7 +2,7 @@
 cli.py — db-clinic evaluation CLI entry point.
 
 Usage:
-  python -m eval.engine --cases eval/cases/
+  python -m eval.engine --cases tests/cases/
   python -m eval.engine --case case_ops_023.yaml
   python -m eval.engine --dry-run
 """
@@ -14,13 +14,13 @@ import asyncio
 import sys
 from pathlib import Path
 
-from eval.engine.schema import BenchmarkCase
-from eval.engine.runner import BenchmarkRunner, CaseRunResult, EvalConfig
-from eval.engine.metrics import compute_suite_metrics
-from eval.engine.logger import InteractionLogger, _sanitize_filename
+from tests.engine.schema import BenchmarkCase
+from tests.engine.runner import BenchmarkRunner, CaseRunResult, EvalConfig
+from tests.engine.metrics import compute_suite_metrics
+from tests.engine.logger import InteractionLogger, _sanitize_filename
 
 # ---------------------------------------------------------------------------
-# Default paths (relative to the eval/ directory)
+# Default paths (relative to the tests/ directory)
 # ---------------------------------------------------------------------------
 
 _EVAL_DIR = Path(__file__).resolve().parent.parent
@@ -34,7 +34,7 @@ DEFAULT_OUTPUT_DIR = str(_EVAL_DIR / "results")
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="eval.engine",
+        prog="tests.engine",
         description="db-clinic evaluation — multi-turn diagnostic agent benchmark.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -102,7 +102,7 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 def run_dry_run(cases: list[BenchmarkCase], config: EvalConfig) -> None:
-    from eval.engine.matcher import SemanticMatcher
+    from tests.engine.matcher import SemanticMatcher
 
     matcher = SemanticMatcher(threshold=config.artifact_match_threshold)
     print("\n[DRY RUN] 测试 SemanticMatcher 自一致性...\n")
@@ -199,7 +199,7 @@ async def run_eval(
 def _load_adapter(direct: bool = False):
     import importlib
 
-    factory_module = importlib.import_module("eval.eval_adapter")
+    factory_module = importlib.import_module("tests.eval_adapter")
     factory_name = "create_agent_direct" if direct else "create_agent"
     factory = getattr(factory_module, factory_name, None)
     if factory is None:

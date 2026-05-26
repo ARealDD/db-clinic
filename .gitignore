@@ -19,10 +19,13 @@ python/generated/
 status-help.txt
 
 # Local LLM config (contains API keys)
-eval/llm/config.local.yaml
+tests/llm/config.local.yaml
+
+# Local production config (contains DB credentials)
+config.local.yaml
 
 # Symlink to dba-bench test cases
-eval/cases
+tests/cases
 
 # Evaluation run output
-eval/results/
+tests/results/

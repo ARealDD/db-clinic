@@ -266,7 +266,7 @@ def create_agent(skill_mode: str = "full"):
 
 def _default_eval_binary_path() -> str:
     """Resolve the agent-eval binary path, preferring cargo build output."""
-    # Check relative to this file: eval/ → rust/target/debug/agent-eval
+    # Check relative to this file: tests/ → rust/target/debug/agent-eval
     eval_dir = Path(__file__).resolve().parent
     for candidate in (
         eval_dir / ".." / "rust" / "target" / "debug" / "agent-eval",

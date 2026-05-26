@@ -2,15 +2,15 @@
 # ------------------------------------------------------------------
 #  run_eval.sh — build db-clinic, start gRPC server, run evaluation.
 #
-#  Prerequisites: eval/llm/config.local.yaml with a valid API key.
-#  Copy eval/llm/config.yaml to config.local.yaml and fill in your keys.
+#  Prerequisites: tests/llm/config.local.yaml with a valid API key.
+#  Copy tests/llm/config.yaml to config.local.yaml and fill in your keys.
 #
 #  Usage:
-#    eval/run_eval.sh                              # full suite (gRPC)
-#    eval/run_eval.sh --direct                     # full suite (direct Rust)
-#    eval/run_eval.sh --case case_ops_023.yaml     # single case
-#    eval/run_eval.sh --cases <path>               # custom cases dir
-#    eval/run_eval.sh --dry-run                    # matcher-only test (no LLM calls)
+#    tests/run_eval.sh                              # full suite (gRPC)
+#    tests/run_eval.sh --direct                     # full suite (direct Rust)
+#    tests/run_eval.sh --case case_ops_023.yaml     # single case
+#    tests/run_eval.sh --cases <path>               # custom cases dir
+#    tests/run_eval.sh --dry-run                    # matcher-only test (no LLM calls)
 # ------------------------------------------------------------------
 set -e
 
@@ -33,15 +33,15 @@ while [[ $# -gt 0 ]]; do
     --cases)      CASES_DIR="$2"; shift 2 ;;
     --dry-run)    DRY_RUN="--dry-run"; shift ;;
     --help|-h)
-      echo "Usage: eval/run_eval.sh [--direct] [--case FILE] [--cases PATH] [--dry-run]"
+      echo "Usage: tests/run_eval.sh [--direct] [--case FILE] [--cases PATH] [--dry-run]"
       echo ""
       echo "  --direct      Use direct Rust agent-eval binary (no gRPC server)"
       echo "  --case FILE   Run a single case (e.g. case_ops_023.yaml)"
-      echo "  --cases PATH  Custom cases directory (default: eval/cases)"
+      echo "  --cases PATH  Custom cases directory (default: tests/cases)"
       echo "  --dry-run     Matcher-only test (no agent/LLM calls)"
       echo ""
       echo "Prerequisites:"
-      echo "  Copy eval/llm/config.yaml to eval/llm/config.local.yaml"
+      echo "  Copy tests/llm/config.yaml to tests/llm/config.local.yaml"
       echo "  and fill in your API key, provider, model, and base_url."
       exit 0 ;;
     *) EXTRA_ARGS+=("$1"); shift ;;
@@ -76,8 +76,8 @@ else:
       echo "ERROR: No API key configured."
       echo ""
       echo "  Copy the template and fill in your API key:"
-      echo "    cp eval/llm/config.yaml eval/llm/config.local.yaml"
-      echo "    # edit eval/llm/config.local.yaml"
+      echo "    cp tests/llm/config.yaml tests/llm/config.local.yaml"
+      echo "    # edit tests/llm/config.local.yaml"
       echo ""
       echo "  Or set the DB_CLINIC_API_KEY environment variable."
       exit 1
@@ -162,7 +162,7 @@ echo "============================================"
 echo ""
 
 cd "$REPO_ROOT"
-RUNNER="eval/engine/run.py"
+RUNNER="tests/engine/run.py"
 if [ -n "$DRY_RUN" ]; then
   python "$RUNNER" --dry-run --cases "$CASES_DIR" $DIRECT "${EXTRA_ARGS[@]}"
 else

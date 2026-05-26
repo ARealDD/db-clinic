@@ -1,5 +1,5 @@
 """
-eval/engine — db-clinic evaluation engine (extracted from dba-bench).
+tests/engine — db-clinic evaluation engine (extracted from dba-bench).
 
 Core modules:
   schema    — BenchmarkCase, Artifact, OracleRootCause, OracleAction
@@ -12,11 +12,11 @@ Core modules:
   cli       — CLI entry point
 """
 
-from eval.engine.schema import BenchmarkCase, Artifact, OracleRootCause, OracleAction
-from eval.engine.runner import BenchmarkRunner, EvalConfig, CaseRunResult, TurnLog
-from eval.engine.metrics import SuiteResult, compute_suite_metrics
-from eval.engine.logger import InteractionLogger
-from eval.engine.protocol import AgentProtocol, SimpleSession
+from tests.engine.schema import BenchmarkCase, Artifact, OracleRootCause, OracleAction
+from tests.engine.runner import BenchmarkRunner, EvalConfig, CaseRunResult, TurnLog
+from tests.engine.metrics import SuiteResult, compute_suite_metrics
+from tests.engine.logger import InteractionLogger
+from tests.engine.protocol import AgentProtocol, SimpleSession
 
 __version__ = "0.1.0"
 

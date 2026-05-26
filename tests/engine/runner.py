@@ -41,13 +41,13 @@ import traceback
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from eval.engine.schema import BenchmarkCase, Artifact
-from eval.engine.matcher import SemanticMatcher, MatchResult
-from eval.engine.intent import Intent, IntentRecognizer, FinalAnswerExtractor
+from tests.engine.schema import BenchmarkCase, Artifact
+from tests.engine.matcher import SemanticMatcher, MatchResult
+from tests.engine.intent import Intent, IntentRecognizer, FinalAnswerExtractor
 
 if TYPE_CHECKING:
-    from eval.engine.protocol import AgentProtocol as DBAAgent
-    from eval.engine.protocol import SimpleSession
+    from tests.engine.protocol import AgentProtocol as DBAAgent
+    from tests.engine.protocol import SimpleSession
 
 
 def _strip_think_output(text: str) -> str:
@@ -351,7 +351,7 @@ class BenchmarkRunner:
         if session_factory is not None:
             self._session_factory = session_factory
         else:
-            from eval.engine.protocol import SimpleSession
+            from tests.engine.protocol import SimpleSession
             self._session_factory = SimpleSession
 
     @staticmethod
@@ -405,7 +405,7 @@ class BenchmarkRunner:
         Creates a fresh session, drives the multi-turn loop, and returns
         a complete CaseRunResult with all metrics and turn logs.
         """
-        from eval.engine.protocol import SimpleSession
+        from tests.engine.protocol import SimpleSession
 
         result = CaseRunResult(case_id=case.case_id)
         session = self._session_factory()

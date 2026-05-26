@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from eval.engine.runner import CaseRunResult
+    from tests.engine.runner import CaseRunResult
 
 
 @dataclass

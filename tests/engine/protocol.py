@@ -7,7 +7,7 @@ SimpleSession 是内置的最小 session 实现，适用于独立运行和单元
 接入示例（以 D-bot 为例）：
 
     # d_bot/eval_adapter.py
-    from eval.engine.protocol import SimpleSession
+    from tests.engine.protocol import SimpleSession
 
     def create_agent():
         agent = DBotAgent(...)   # 实现 AgentProtocol.chat() 即可

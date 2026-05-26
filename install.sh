@@ -387,7 +387,7 @@ Authentication:
   ${COLOR_DIM}# or use OAuth:${COLOR_RESET}
   ${CLAW_BIN} login
 
-For deeper docs, see USAGE.md and rust/README.md.
+For deeper docs, see archive/USAGE.md and rust/README.md.
 EOF
 
 # clear the failure trap on clean exit
