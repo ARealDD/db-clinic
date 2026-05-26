@@ -1,0 +1,20 @@
+[package]
+name = "agent-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "agent-eval"
+path = "src/main.rs"
+
+[dependencies]
+api = { path = "../api" }
+runtime = { path = "../runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

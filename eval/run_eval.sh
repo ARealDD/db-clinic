@@ -6,7 +6,8 @@
 #  Copy eval/llm/config.yaml to config.local.yaml and fill in your keys.
 #
 #  Usage:
-#    eval/run_eval.sh                              # full suite
+#    eval/run_eval.sh                              # full suite (gRPC)
+#    eval/run_eval.sh --direct                     # full suite (direct Rust)
 #    eval/run_eval.sh --case case_ops_023.yaml     # single case
 #    eval/run_eval.sh --cases <path>               # custom cases dir
 #    eval/run_eval.sh --dry-run                    # matcher-only test (no LLM calls)
@@ -20,18 +21,21 @@ CONFIG_FILE="$SCRIPT_DIR/llm/config.local.yaml"
 # Defaults
 CASE_ARG=""
 DRY_RUN=""
+DIRECT=""
 CASES_DIR="$SCRIPT_DIR/cases"
 EXTRA_ARGS=()
 
 # Parse flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --direct)     DIRECT="--direct"; shift ;;
     --case)       CASE_ARG="$2"; CASES_DIR="$SCRIPT_DIR/cases/$2"; shift 2 ;;
     --cases)      CASES_DIR="$2"; shift 2 ;;
     --dry-run)    DRY_RUN="--dry-run"; shift ;;
     --help|-h)
-      echo "Usage: eval/run_eval.sh [--case FILE] [--cases PATH] [--dry-run]"
+      echo "Usage: eval/run_eval.sh [--direct] [--case FILE] [--cases PATH] [--dry-run]"
       echo ""
+      echo "  --direct      Use direct Rust agent-eval binary (no gRPC server)"
       echo "  --case FILE   Run a single case (e.g. case_ops_023.yaml)"
       echo "  --cases PATH  Custom cases directory (default: eval/cases)"
       echo "  --dry-run     Matcher-only test (no agent/LLM calls)"
@@ -99,8 +103,8 @@ else:
   esac
 fi
 
-# Ensure gRPC stubs are generated
-if [ ! -f "$REPO_ROOT/python/generated/agent_pb2.py" ]; then
+# Ensure gRPC stubs are generated (only needed for the gRPC path)
+if [ -z "$DIRECT" ] && [ ! -f "$REPO_ROOT/python/generated/agent_pb2.py" ]; then
   echo "==> Generating Python gRPC stubs"
   bash "$REPO_ROOT/scripts/gen-proto.sh"
 fi
@@ -108,39 +112,45 @@ fi
 # Source cargo env if available
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 
-# Build and start gRPC server (skip for dry-run)
+# Build and start gRPC server (skip for dry-run and direct mode)
 if [ -z "$DRY_RUN" ]; then
-  echo "==> Building Rust workspace"
-  cd "$REPO_ROOT/rust"
-  cargo build -p agent-grpc-server 2>&1 | tail -3
+  if [ -n "$DIRECT" ]; then
+    echo "==> Building agent-eval (direct mode)"
+    cd "$REPO_ROOT/rust"
+    cargo build -p agent-eval 2>&1 | tail -3
+  else
+    echo "==> Building gRPC server"
+    cd "$REPO_ROOT/rust"
+    cargo build -p agent-grpc-server 2>&1 | tail -3
 
-  echo "==> Starting gRPC server"
-  GRPC_PID=""
-  cleanup() {
-    if [ -n "$GRPC_PID" ]; then
-      echo ""
-      echo "==> Stopping gRPC server (pid=$GRPC_PID)"
-      kill "$GRPC_PID" 2>/dev/null && wait "$GRPC_PID" 2>/dev/null || true
-    fi
-  }
-  trap cleanup EXIT INT TERM
+    echo "==> Starting gRPC server"
+    GRPC_PID=""
+    cleanup() {
+      if [ -n "$GRPC_PID" ]; then
+        echo ""
+        echo "==> Stopping gRPC server (pid=$GRPC_PID)"
+        kill "$GRPC_PID" 2>/dev/null && wait "$GRPC_PID" 2>/dev/null || true
+      fi
+    }
+    trap cleanup EXIT INT TERM
 
-  cargo run -p agent-grpc-server -- --addr 0.0.0.0:50051 --skills-dir "$REPO_ROOT/skills" &
-  GRPC_PID=$!
+    cargo run -p agent-grpc-server -- --addr 0.0.0.0:50051 --skills-dir "$REPO_ROOT/skills" &
+    GRPC_PID=$!
 
-  # Wait for gRPC server to be ready
-  echo "==> Waiting for gRPC server..."
-  for i in $(seq 1 15); do
-    if ! kill -0 "$GRPC_PID" 2>/dev/null; then
-      echo "ERROR: gRPC server exited unexpectedly."
-      exit 1
-    fi
-    if nc -z 127.0.0.1 50051 2>/dev/null; then
-      echo "==> gRPC server ready"
-      break
-    fi
-    sleep 1
-  done
+    # Wait for gRPC server to be ready
+    echo "==> Waiting for gRPC server..."
+    for i in $(seq 1 15); do
+      if ! kill -0 "$GRPC_PID" 2>/dev/null; then
+        echo "ERROR: gRPC server exited unexpectedly."
+        exit 1
+      fi
+      if nc -z 127.0.0.1 50051 2>/dev/null; then
+        echo "==> gRPC server ready"
+        break
+      fi
+      sleep 1
+    done
+  fi
 fi
 
 # Run evaluation
@@ -152,11 +162,13 @@ echo "============================================"
 echo ""
 
 cd "$REPO_ROOT"
+RUNNER="eval/engine/run.py"
 if [ -n "$DRY_RUN" ]; then
-  python -m eval.engine --dry-run --cases "$CASES_DIR" "${EXTRA_ARGS[@]}"
+  python "$RUNNER" --dry-run --cases "$CASES_DIR" $DIRECT "${EXTRA_ARGS[@]}"
 else
-  python -m eval.engine \
+  python "$RUNNER" \
     --cases "$CASES_DIR" \
     --output "$SCRIPT_DIR/results" \
+    $DIRECT \
     "${EXTRA_ARGS[@]}"
 fi

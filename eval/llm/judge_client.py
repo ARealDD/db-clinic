@@ -52,7 +52,7 @@ class JudgeLLMClient:
         model = model or self._model
         messages = messages or []
 
-        if self._provider == "anthropic":
+        if self._provider in ("anthropic", "deepseek"):
             async for chunk in self._stream_anthropic(model, system, messages, max_tokens):
                 yield chunk
         else:

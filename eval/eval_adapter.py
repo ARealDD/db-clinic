@@ -20,10 +20,12 @@ Set DB_CLINIC_MODEL and DB_CLINIC_API_KEY to use a real LLM provider.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import queue
 import sys
 import threading
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import grpc
@@ -260,3 +262,153 @@ def create_agent(skill_mode: str = "full"):
     agent = DbClinicAgent(grpc_addr=GRPC_ADDR)
     judge = JudgeLLMClient()
     return agent, DbClinicSession, judge, judge.model or "default"
+
+
+def _default_eval_binary_path() -> str:
+    """Resolve the agent-eval binary path, preferring cargo build output."""
+    # Check relative to this file: eval/ → rust/target/debug/agent-eval
+    eval_dir = Path(__file__).resolve().parent
+    for candidate in (
+        eval_dir / ".." / "rust" / "target" / "debug" / "agent-eval",
+        eval_dir / ".." / "rust" / "target" / "release" / "agent-eval",
+    ):
+        resolved = candidate.resolve()
+        if resolved.exists():
+            return str(resolved)
+    return "agent-eval"  # fall back to PATH
+
+
+# ---------------------------------------------------------------------------
+# Direct Rust agent (bypass gRPC, invoke agent-eval binary via subprocess)
+# ---------------------------------------------------------------------------
+
+
+class DirectEvalSession:
+    """Holds the agent-eval session state for one benchmark case."""
+
+    def __init__(self) -> None:
+        self.session_id: str = ""
+
+    def has_pending_proxy(self) -> bool:
+        return False
+
+
+class DirectEvalAgent:
+    """AgentProtocol implementation that spawns agent-eval as a subprocess.
+
+    Communicates via JSON lines on stdin/stdout — no gRPC, no protobuf.
+    """
+
+    def __init__(self, binary_path: str | None = None) -> None:
+        if binary_path:
+            self._binary_path = binary_path
+        else:
+            self._binary_path = os.environ.get(
+                "DB_CLINIC_EVAL_BINARY", _default_eval_binary_path()
+            )
+        self._process: asyncio.subprocess.Process | None = None
+
+    async def _ensure_process(self) -> None:
+        if self._process is not None:
+            return
+        _ensure_env_vars()
+        self._process = await asyncio.create_subprocess_exec(
+            self._binary_path,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=None,  # inherit stderr so errors are visible
+        )
+
+    async def chat(
+        self, session: DirectEvalSession, user_message: str
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Run one conversation turn via the agent-eval binary."""
+        await self._ensure_process()
+        assert self._process is not None and self._process.stdin is not None
+        assert self._process.stdout is not None
+
+        # Send JSON request.
+        req = {"message": user_message, "session_id": session.session_id or None}
+        self._process.stdin.write((json.dumps(req) + "\n").encode())
+        await self._process.stdin.drain()
+
+        # Read JSON response.
+        line = await self._process.stdout.readline()
+        raw = line.decode().strip()
+        if not raw:
+            yield {"type": "error", "message": "empty response from agent-eval"}
+            return
+
+        try:
+            resp = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            yield {"type": "error", "message": f"invalid JSON from agent-eval: {exc}"}
+            return
+
+        if resp.get("error"):
+            yield {"type": "error", "message": resp["error"]}
+            return
+
+        # Store session_id on first turn.
+        if not session.session_id:
+            session.session_id = resp["session_id"]
+
+        text = resp.get("text") or ""
+        if text:
+            yield {"type": "text_delta", "text": text}
+
+        yield {"type": "done", "stop_reason": resp.get("stop_reason", "end_turn")}
+
+    async def close(self) -> None:
+        if self._process is not None and self._process.stdin is not None:
+            self._process.stdin.close()
+            await self._process.wait()
+            self._process = None
+
+
+def _ensure_env_vars() -> None:
+    """Set provider env vars from config so the agent-eval subprocess can find them."""
+    cfg = _load_config()
+
+    model = cfg.get("model", "")
+    if model:
+        os.environ.setdefault("DB_CLINIC_MODEL", model)
+
+    provider = cfg.get("provider", "anthropic")
+    api_key = cfg.get("api_key", "")
+    base_url = cfg.get("base_url", "")
+
+    if provider == "anthropic":
+        if api_key:
+            os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+        if base_url:
+            os.environ.setdefault("ANTHROPIC_BASE_URL", base_url)
+    elif provider == "deepseek":
+        # DeepSeek speaks the Anthropic wire format.
+        if api_key:
+            os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+        if base_url:
+            os.environ.setdefault("ANTHROPIC_BASE_URL", base_url)
+    elif provider == "openai":
+        if api_key:
+            os.environ.setdefault("OPENAI_API_KEY", api_key)
+        if base_url:
+            os.environ.setdefault("OPENAI_BASE_URL", base_url)
+    elif provider == "xai":
+        if api_key:
+            os.environ.setdefault("XAI_API_KEY", api_key)
+        if base_url:
+            os.environ.setdefault("XAI_BASE_URL", base_url)
+
+
+def create_agent_direct(skill_mode: str = "full") -> tuple:
+    """Factory for the direct Rust agent path (no gRPC).
+
+    Returns (agent, session_factory, judge_client, judge_model) 4-tuple.
+    """
+    _ = skill_mode
+    from .llm.judge_client import JudgeLLMClient
+
+    agent = DirectEvalAgent()
+    judge = JudgeLLMClient()
+    return agent, DirectEvalSession, judge, judge.model or "default"

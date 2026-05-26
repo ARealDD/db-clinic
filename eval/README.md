@@ -22,16 +22,17 @@ eval/
     config.local.yaml      # Your API keys (git-ignored, copy from config.yaml)
     config.py              # Config loader (file + env vars)
     judge_client.py        # LLM judge client for oracle scoring
-  eval_adapter.py          # gRPC agent adapter (AgentProtocol impl)
-  run_eval.sh              # Build server + run eval in one command
+  eval_adapter.py          # Agent adapters (gRPC + Direct Rust)
+  run_eval.sh              # Build + run eval in one command
+  eval.sh                  # Lightweight wrapper (run only)
   requirements.txt         # Python dependencies
   cases -> ../dba-bench/cases/  # Symlink to test cases
   results/                 # Evaluation output (git-ignored)
 ```
 
-## Quick Start
+## Setup (both approaches)
 
-### 1. Install dependencies
+### 1. Install Python dependencies
 
 ```bash
 pip install -r eval/requirements.txt
@@ -46,38 +47,126 @@ cp eval/llm/config.yaml eval/llm/config.local.yaml
 
 Supported providers: `anthropic`, `openai`, `custom`, `xai`, `dashscope`.
 
-The config is shared by both the agent (gRPC server) and the judge (oracle scoring). Env vars like `DB_CLINIC_API_KEY` take priority over file config.
+The config is shared by the agent, the judge (oracle scoring), and both approaches below. Env vars like `DB_CLINIC_API_KEY` take priority over file config.
 
-### 3. Run evaluation
+### 3. Ensure Rust toolchain
+
+Source the Rust environment if needed:
 
 ```bash
-# Full suite
-eval/run_eval.sh
+source ~/.cargo/env
+```
 
+## Approach 1: gRPC (full tool execution)
+
+This starts a Rust gRPC server, then runs the evaluation client against it. Tools are executed for real, skills are matched, and operator approval is supported.
+
+### Build the gRPC server
+
+The Rust workspace is in `rust/` — build from that directory:
+
+```bash
+cd rust
+cargo build -p agent-grpc-server
+cd ..
+```
+
+### Run
+
+#### One-command (build + start server + run eval)
+
+```bash
+eval/run_eval.sh
+```
+
+#### Manual (two terminals)
+
+Terminal 1 — start the gRPC server:
+
+```bash
+cd rust
+cargo run -p agent-grpc-server -- --addr 0.0.0.0:50051 --skills-dir ../skills
+```
+
+Terminal 2 — run the evaluation:
+
+```bash
+# From repo root
+python -m eval.engine --cases eval/cases --output eval/results
+
+# Or from any directory
+eval/eval.sh --cases eval/cases --output eval/results
+```
+
+## Approach 2: Direct Rust Agent (no gRPC)
+
+This bypasses the gRPC server and invokes the Rust agent directly via a lightweight stdin/stdout JSON-lines binary. Simpler and faster for evaluation, but does not execute real tools or match skills — the agent produces text-only responses.
+
+### Architecture
+
+```
+Python eval engine     agent-eval (Rust binary)
+     stdin ──────────>  runtime::ConversationRuntime ──> LLM API
+     stdout <──────────       (no gRPC, no protobuf)
+```
+
+### Build the agent-eval binary
+
+The Rust workspace is in `rust/` — build from that directory:
+
+```bash
+cd rust
+cargo build -p agent-eval
+cd ..
+```
+
+The Python adapter auto-discovers the binary at `rust/target/debug/agent-eval`.
+
+### Run
+
+#### One-command (build + run eval)
+
+```bash
+eval/run_eval.sh --direct
+```
+
+#### Manual
+
+```bash
+# From repo root
+python -m eval.engine --direct --cases eval/cases --output eval/results
+
+# From any directory
+eval/eval.sh --direct --cases eval/cases --output eval/results
+```
+
+### What's different from the gRPC path
+
+| Aspect | gRPC | Direct |
+|--------|------|--------|
+| Communication | Protobuf / tonic streaming | JSON lines on stdin/stdout |
+| Tools | Real tool execution (proxied to operator) | Stubbed (eval mode) |
+| Skills | SkillEngine matched server-side | Not loaded |
+| Permissions | Operator approval (proxy) | Auto-approve |
+| Session management | Actor-based thread | In-process HashMap |
+
+## Options
+
+```bash
 # Single case
 eval/run_eval.sh --case case_ops_023.yaml
-
-# Dry run (matcher only, no LLM calls)
-eval/run_eval.sh --dry-run
+eval/run_eval.sh --direct --case case_ops_023.yaml
 
 # Custom cases directory
 eval/run_eval.sh --cases /path/to/cases
-```
 
-### 4. Or run manually
-
-```bash
-# Start the gRPC server
-source ~/.cargo/env
-cargo run -p agent-grpc-server -- --addr 0.0.0.0:50051 --skills-dir skills
-
-# In another terminal, run the eval engine
-python -m eval.engine --cases eval/cases --output eval/results
+# Dry run (matcher only, no LLM calls)
+eval/run_eval.sh --dry-run
 ```
 
 ## Test Cases
 
-Test cases are symlinked from the dba-bench repository (`../doer_experiment/dba-bench/cases/`). Each case is a YAML file defining:
+Each case is a YAML file defining:
 
 - **User report** — the initial problem description
 - **Information inventory** — available evidence/artifacts

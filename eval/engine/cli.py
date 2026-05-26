@@ -88,6 +88,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
     )
     p.add_argument("--consistency-bypass-ratio", type=float, default=1.5)
+    p.add_argument(
+        "--direct",
+        action="store_true",
+        default=False,
+        help="Use direct Rust agent-eval binary instead of gRPC path.",
+    )
     return p
 
 
@@ -190,10 +196,20 @@ async def run_eval(
 # Load our adapter (hardwired — we own the evaluation now)
 # ---------------------------------------------------------------------------
 
-def _load_adapter():
+def _load_adapter(direct: bool = False):
     import importlib
+
     factory_module = importlib.import_module("eval.eval_adapter")
-    result = factory_module.create_agent()
+    factory_name = "create_agent_direct" if direct else "create_agent"
+    factory = getattr(factory_module, factory_name, None)
+    if factory is None:
+        print(
+            f"ERROR: adapter function `{factory_name}` not found in eval.eval_adapter",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    result = factory()
     if isinstance(result, tuple) and len(result) == 4:
         agent, session_factory, eval_llm_client, eval_model = result
         return agent, session_factory, eval_llm_client, eval_model
@@ -261,7 +277,7 @@ def main() -> int:
         return 0
 
     # Full evaluation — load our adapter
-    agent, session_factory, eval_llm_client, eval_model = _load_adapter()
+    agent, session_factory, eval_llm_client, eval_model = _load_adapter(direct=args.direct)
 
     asyncio.run(run_eval(
         agent=agent,
