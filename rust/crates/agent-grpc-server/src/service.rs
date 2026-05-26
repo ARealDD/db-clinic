@@ -27,6 +27,13 @@ const SKILL_SELECTION_MARKER: &str = "skill_selection";
 /// `ContextAttachment.source` for each individual selected skill row. The
 /// attachment's `content` is the skill id.
 const SELECTED_SKILL_SOURCE: &str = "selected_skill";
+/// `ContextAttachment.source` set by the frontend when an operator absorbs a
+/// fork pane's final answer back into its parent session. `content` holds the
+/// fork's last assistant text; `metadata["task"]` carries the fork's original
+/// one-line task description so the parent LLM can frame the report. We
+/// prepend a synthesized `[Fork report — task: ...]` block to the `user_text`
+/// before running the parent's next turn — see `handle_user_message`.
+const FORK_SUMMARY_SOURCE: &str = "fork_summary";
 
 pub struct AgentServiceImpl {
     manager: SessionManager,
@@ -355,7 +362,38 @@ async fn handle_user_message(
     session_id: &str,
     user_msg: &proto::UserMessage,
 ) {
-    let user_text = user_msg.content.clone();
+    // Fork absorb path: when the operator clicks "Send result to parent" on a
+    // fork pane, the frontend posts a new user_message carrying the fork's
+    // final answer as a `fork_summary` ContextAttachment. We splice it in
+    // front of whatever the operator also typed (usually empty) so the parent
+    // LLM sees the fork report as fresh context for its next turn.
+    let fork_notes: Vec<String> = user_msg
+        .context
+        .iter()
+        .filter(|a| a.source == FORK_SUMMARY_SOURCE)
+        .map(|a| {
+            let task = a
+                .metadata
+                .get("task")
+                .map_or("(no task description)", String::as_str);
+            format!(
+                "[Fork report — task: {task}]\n{}\n[End fork report]",
+                a.content
+            )
+        })
+        .collect();
+
+    let user_text = if fork_notes.is_empty() {
+        user_msg.content.clone()
+    } else if user_msg.content.trim().is_empty() {
+        fork_notes.join("\n\n")
+    } else {
+        format!(
+            "{}\n\n---\n\nOperator note:\n{}",
+            fork_notes.join("\n\n"),
+            user_msg.content
+        )
+    };
     let skill_engine = Arc::clone(manager.skill_engine());
 
     // UI path: the frontend has already shown a picker and recorded the

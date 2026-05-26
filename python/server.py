@@ -33,8 +33,24 @@ app = FastAPI(title="Agent Gateway")
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception):
-    log.error("unhandled exception on %s %s: %s", request.method, request.url.path, exc)
+    log.exception("unhandled exception on %s %s", request.method, request.url.path)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+@app.middleware("http")
+async def _no_cache_html(request: Request, call_next):
+    # Browsers heuristically cache HTML without explicit Cache-Control, which
+    # caused the frontend/backend lockstep upgrade in commit 87ff8a3 to ship
+    # an old settings.html that POSTed /api/config without the new Bearer
+    # header. Force revalidation for HTML and JS so dev upgrades take effect
+    # on the next page load instead of after a manual hard refresh.
+    response = await call_next(request)
+    path = request.url.path
+    if path.endswith((".html", ".js")) or path in ("/", "/login"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 @app.on_event("startup")
@@ -195,15 +211,98 @@ async def create_session(
             base_url=config.base_url,
         )
 
+    try:
+        with _grpc_channel() as ch:
+            stub = agent_pb2_grpc.AgentServiceStub(ch)
+            resp = stub.CreateSession(agent_pb2.CreateSessionRequest(
+                model=model,
+                system_prompts=[system_prompt],
+                api_config=api_config,
+            ))
+    except grpc.RpcError as e:
+        log.error("CreateSession gRPC error: code=%s details=%s", e.code(), e.details())
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent kernel failed to create session: {e.code().name}: {e.details()}",
+        ) from e
+    log.info("created session %s (model=%s, has_api_config=%s, user=%s)",
+             resp.session_id, model, api_config is not None, current_user["username"])
+    return {"session_id": resp.session_id, "created_at_ms": resp.created_at_ms}
+
+
+_DELIVERABLE_DIRECTIVES = {
+    "conclusion": "Respond with a single short conclusion paragraph. Do NOT include a bulleted evidence list.",
+    "evidence": "Respond with a bulleted evidence list ONLY. Do NOT include a standalone conclusion paragraph.",
+    "both": "Respond with (1) a one-paragraph conclusion, then (2) a bulleted evidence list backing it up.",
+}
+
+
+@app.post("/api/sessions/fork")
+async def fork_session(
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Create a child session scoped to a focused investigation.
+
+    Payload shape:
+      { "parent_session_id": str,
+        "selected_units":    [{"kind": str, "content": str}, ...],
+        "task":              str,                  # one-line description
+        "deliverable":       "conclusion" | "evidence" | "both" }
+    """
+    parent_session_id = payload.get("parent_session_id") or ""
+    selected_units = payload.get("selected_units") or []
+    task = (payload.get("task") or "").strip()
+    deliverable = payload.get("deliverable") or "both"
+
+    if not task:
+        raise HTTPException(status_code=400, detail="task is required")
+    if deliverable not in _DELIVERABLE_DIRECTIVES:
+        raise HTTPException(status_code=400, detail=f"deliverable must be one of {list(_DELIVERABLE_DIRECTIVES)}")
+
+    config = await _get_user_llm_config(current_user["id"])
+    model = config.model or "mock"
+    base_prompt = config.system_prompt or "You are a database diagnosis assistant."
+
+    if selected_units:
+        context_block = "\n\n".join(
+            f"## Selected {u.get('kind', 'item')}\n{u.get('content', '')}"
+            for u in selected_units
+        )
+    else:
+        context_block = "_(no context units were attached — work from your task only)_"
+
+    fork_prompt = (
+        "# Fork investigation\n\n"
+        "You are a focused sub-agent spun off from a larger DB diagnosis. "
+        "Your scope is STRICTLY the task below. Do NOT pursue tangents.\n\n"
+        f"## Task\n{task}\n\n"
+        f"## Selected context from parent conversation\n{context_block}\n\n"
+        f"## Expected deliverable\n{_DELIVERABLE_DIRECTIVES[deliverable]}\n\n"
+        "If the selected context is insufficient to answer the task, say so explicitly "
+        "and list what additional evidence you would need — do NOT make up findings."
+    )
+
+    api_config = None
+    if config.api_key:
+        api_config = agent_pb2.ApiConfig(
+            provider=config.provider,
+            api_key=config.api_key,
+            base_url=config.base_url,
+        )
+
     with _grpc_channel() as ch:
         stub = agent_pb2_grpc.AgentServiceStub(ch)
         resp = stub.CreateSession(agent_pb2.CreateSessionRequest(
             model=model,
-            system_prompts=[system_prompt],
+            system_prompts=[base_prompt, fork_prompt],
             api_config=api_config,
         ))
-    log.info("created session %s (model=%s, has_api_config=%s, user=%s)",
-             resp.session_id, model, api_config is not None, current_user["username"])
+    log.info(
+        "forked session %s from parent %s (task=%r, deliverable=%s, units=%d, user=%s)",
+        resp.session_id, parent_session_id, task, deliverable,
+        len(selected_units), current_user["username"],
+    )
     return {"session_id": resp.session_id, "created_at_ms": resp.created_at_ms}
 
 
@@ -453,13 +552,21 @@ async def ws_chat(ws: WebSocket, session_id: str):
                     "session %s: user_message len=%d context=%d",
                     session_id, len(content), len(context_attachments),
                 )
-                proto_attachments = [
-                    agent_pb2.ContextAttachment(
-                        source=str(a.get("source", "")),
-                        content=str(a.get("content", "")),
+                proto_attachments = []
+                for a in context_attachments:
+                    raw_meta = a.get("metadata") or {}
+                    meta = {
+                        str(k): str(v)
+                        for k, v in raw_meta.items()
+                        if v is not None
+                    } if isinstance(raw_meta, dict) else {}
+                    proto_attachments.append(
+                        agent_pb2.ContextAttachment(
+                            source=str(a.get("source", "")),
+                            content=str(a.get("content", "")),
+                            metadata=meta,
+                        )
                     )
-                    for a in context_attachments
-                ]
                 chat_input = agent_pb2.ChatInput(session_id=session_id)
                 chat_input.user_message.CopyFrom(
                     agent_pb2.UserMessage(content=content, context=proto_attachments)
