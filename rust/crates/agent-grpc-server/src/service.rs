@@ -12,6 +12,7 @@ use crate::proto::agent_service_server::AgentService;
 use crate::proxy_executor::{ProxyInstructionEvent, ProxyTimeoutEvent};
 use crate::session_store::{ApiConfig, ProxyChannels, SessionManager};
 use crate::skill_engine::SkillEngine;
+use session_persistence::SessionBackend;
 
 type ProxyReceivers = (
     mpsc::Receiver<ProxyInstructionEvent>,
@@ -38,21 +39,18 @@ const FORK_SUMMARY_SOURCE: &str = "fork_summary";
 pub struct AgentServiceImpl {
     manager: SessionManager,
     mock_mode: bool,
-    /// Holds the receiver ends of per-session proxy channels until the
-    /// matching `Chat` RPC connects and starts forwarding events to the
-    /// client.
     pending_proxy_receivers: Arc<Mutex<HashMap<String, ProxyReceivers>>>,
 }
 
 impl AgentServiceImpl {
-    pub fn new(mock_mode: bool, skills_root: Option<PathBuf>) -> Self {
+    pub fn new(mock_mode: bool, skills_root: Option<PathBuf>, backend: Arc<dyn SessionBackend>) -> Self {
         let skill_engine = if let Some(root) = skills_root {
             SkillEngine::load(&root)
         } else {
             SkillEngine::load(&PathBuf::from("skills"))
         };
         Self {
-            manager: SessionManager::new(skill_engine),
+            manager: SessionManager::new(skill_engine, backend),
             mock_mode,
             pending_proxy_receivers: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -111,6 +109,8 @@ impl AgentService for AgentServiceImpl {
                 max_iterations,
                 api_config,
                 proxy_channels,
+                if req.data_dir.is_empty() { None } else { Some(req.data_dir) },
+                if req.user_id.is_empty() { None } else { Some(req.user_id) },
             )
         })
         .await
@@ -267,6 +267,84 @@ impl AgentService for AgentServiceImpl {
 
         Ok(Response::new(proto::CloseSessionResponse {
             total_usage: usage.map(|u| convert::runtime_usage_to_proto(&u)),
+        }))
+    }
+
+    async fn resume_session(
+        &self,
+        request: Request<proto::ResumeSessionRequest>,
+    ) -> Result<Response<proto::ResumeSessionResponse>, Status> {
+        let req = request.into_inner();
+        let session_id = req.session_id;
+        let data_dir = req.data_dir;
+        let user_id = req.user_id;
+        if data_dir.is_empty() {
+            return Err(Status::invalid_argument("data_dir is required"));
+        }
+
+        let model = if req.model.is_empty() {
+            "mock".to_string()
+        } else {
+            req.model
+        };
+
+        let max_iterations = req.config.as_ref().and_then(|c| {
+            let n = c.max_iterations;
+            if n > 0 {
+                #[allow(clippy::cast_sign_loss)]
+                Some(n as usize)
+            } else {
+                None
+            }
+        });
+
+        let api_config = req.api_config.and_then(|c| {
+            if c.api_key.is_empty() {
+                None
+            } else {
+                Some(ApiConfig {
+                    provider: c.provider,
+                    api_key: c.api_key,
+                    base_url: c.base_url,
+                })
+            }
+        });
+
+        let (instruction_tx, instruction_rx) = mpsc::channel::<ProxyInstructionEvent>(32);
+        let (timeout_tx, timeout_rx) = mpsc::channel::<ProxyTimeoutEvent>(8);
+        let proxy_channels = ProxyChannels {
+            instruction_tx,
+            timeout_tx,
+        };
+
+        let manager = self.manager.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            manager.resume_session(
+                &session_id,
+                &data_dir,
+                &user_id,
+                model,
+                req.system_prompts,
+                max_iterations,
+                api_config,
+                proxy_channels,
+            )
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        let (sid, created_at_ms, loaded_messages) = result.map_err(|e| Status::internal(e))?;
+
+        if let Ok(mut guard) = self.pending_proxy_receivers.lock() {
+            guard.insert(sid.clone(), (instruction_rx, timeout_rx));
+        }
+
+        eprintln!("resumed session {sid} (loaded {loaded_messages} messages)");
+
+        Ok(Response::new(proto::ResumeSessionResponse {
+            session_id: sid,
+            created_at_ms,
+            loaded_messages: loaded_messages as u32,
         }))
     }
 

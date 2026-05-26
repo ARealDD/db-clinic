@@ -16,7 +16,7 @@ import agent_pb2_grpc
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
@@ -230,6 +230,11 @@ async def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
+
+
 @app.get("/login")
 async def login_page():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "login.html"))
@@ -262,6 +267,9 @@ async def get_config(
     }
 
 
+_SESSION_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+
 @app.post("/api/sessions")
 async def create_session(
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -285,15 +293,19 @@ async def create_session(
                 model=model,
                 system_prompts=[system_prompt],
                 api_config=api_config,
+                data_dir=_SESSION_DATA_DIR,
+                user_id=current_user["username"],
             ))
+
     except grpc.RpcError as e:
-        log.error("CreateSession gRPC error: code=%s details=%s", e.code(), e.details())
+        log.error("CreateSession gRPC error: code=%s detail=%s", e.code(), e.details())
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent kernel failed to create session: {e.code().name}: {e.details()}",
-        ) from e
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create session: {e.details()}",
+        )
     log.info("created session %s (model=%s, has_api_config=%s, user=%s)",
              resp.session_id, model, api_config is not None, current_user["username"])
+    await db.register_session(current_user["id"], resp.session_id)
     return {"session_id": resp.session_id, "created_at_ms": resp.created_at_ms}
 
 
@@ -370,22 +382,160 @@ async def fork_session(
         resp.session_id, parent_session_id, task, deliverable,
         len(selected_units), current_user["username"],
     )
-    return {"session_id": resp.session_id, "created_at_ms": resp.created_at_ms}
+
+
+@app.get("/api/sessions")
+async def list_sessions(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    return await db.list_user_sessions(current_user["id"])
 
 
 @app.delete("/api/sessions/{session_id}")
-async def close_session(session_id: str):
-    with _grpc_channel() as ch:
-        stub = agent_pb2_grpc.AgentServiceStub(ch)
-        resp = stub.CloseSession(agent_pb2.CloseSessionRequest(session_id=session_id))
+async def close_session(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    owner = await db.get_session_owner(session_id)
+    if owner is not None and owner != current_user["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session not owned by you",
+        )
+    try:
+        with _grpc_channel() as ch:
+            stub = agent_pb2_grpc.AgentServiceStub(ch)
+            resp = stub.CloseSession(agent_pb2.CloseSessionRequest(session_id=session_id))
+    except grpc.RpcError as e:
+        log.warning("gRPC CloseSession error for %s: %s (continuing to delete file)", session_id, e.details())
+        resp = None
     usage = {}
-    if resp.total_usage:
+    if resp and resp.total_usage:
         usage = {
             "input_tokens": resp.total_usage.input_tokens,
             "output_tokens": resp.total_usage.output_tokens,
         }
-    log.info("closed session %s", session_id)
+    log.info("closed session %s (user=%s)", session_id, current_user["username"])
+    await db.delete_session(session_id)
+    jsonl_path = os.path.join(_SESSION_DATA_DIR, "sessions", current_user["username"], f"{session_id}.jsonl")
+    if os.path.exists(jsonl_path):
+        try:
+            os.remove(jsonl_path)
+            log.info("deleted session file %s", jsonl_path)
+        except OSError as e:
+            log.warning("failed to delete session file %s: %s", jsonl_path, e)
     return {"ok": True, "total_usage": usage}
+
+
+@app.post("/api/sessions/{session_id}/resume")
+async def resume_session(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    owner = await db.get_session_owner(session_id)
+    if owner is not None and owner != current_user["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session not owned by you",
+        )
+    config = await _get_user_llm_config(current_user["id"])
+    model = config.model or "mock"
+    system_prompt = config.system_prompt or "You are a database diagnosis assistant."
+
+    api_config = None
+    if config.api_key:
+        api_config = agent_pb2.ApiConfig(
+            provider=config.provider,
+            api_key=config.api_key,
+            base_url=config.base_url,
+        )
+
+    try:
+        with _grpc_channel() as ch:
+            stub = agent_pb2_grpc.AgentServiceStub(ch)
+            resp = stub.ResumeSession(agent_pb2.ResumeSessionRequest(
+                session_id=session_id,
+                data_dir=_SESSION_DATA_DIR,
+                user_id=current_user["username"],
+                model=model,
+                system_prompts=[system_prompt],
+                api_config=api_config,
+            ))
+    except grpc.RpcError as e:
+        log.error("ResumeSession gRPC error for %s: code=%s detail=%s",
+                  session_id, e.code(), e.details())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to resume session: {e.details()}",
+        )
+    log.info("resumed session %s (loaded %d messages, user=%s)",
+             resp.session_id, resp.loaded_messages, current_user["username"])
+    return {
+        "session_id": resp.session_id,
+        "created_at_ms": resp.created_at_ms,
+        "loaded_messages": resp.loaded_messages,
+    }
+
+
+@app.get("/api/sessions/{session_id}/history")
+async def session_history(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    owner = await db.get_session_owner(session_id)
+    if owner is not None and owner != current_user["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session not owned by you",
+        )
+    jsonl_path = os.path.join(_SESSION_DATA_DIR, "sessions", current_user["username"], f"{session_id}.jsonl")
+    if not os.path.exists(jsonl_path):
+        return {"messages": []}
+    messages = []
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("type") == "message":
+                    msg_obj = record.get("message", {})
+                    role = msg_obj.get("role", "")
+                    blocks = msg_obj.get("blocks", [])
+                    text_parts = []
+                    for b in blocks:
+                        try:
+                            if "text" in b:
+                                txt = b["text"]
+                                if isinstance(txt, dict):
+                                    text_parts.append(txt.get("text", ""))
+                                elif isinstance(txt, str):
+                                    text_parts.append(txt)
+                            elif "thinking" in b:
+                                thk = b["thinking"]
+                                if isinstance(thk, dict):
+                                    text_parts.append(thk.get("thinking", ""))
+                                elif isinstance(thk, str):
+                                    text_parts.append(thk)
+                            elif "tool_use" in b:
+                                tu = b["tool_use"]
+                                text_parts.append(f"[Tool: {tu.get('name', '')}] {tu.get('input', '')}")
+                            elif "tool_result" in b:
+                                tr = b["tool_result"]
+                                text_parts.append(f"[Result: {tr.get('tool_name', '')}] {tr.get('output', '')[:200]}")
+                        except (KeyError, TypeError, AttributeError):
+                            continue
+                    content = "\n".join(text_parts)
+                    if content:
+                        messages.append({"role": role, "content": content})
+    except Exception as e:
+        log.error("failed to read session history for %s: %s", session_id, e)
+        return {"messages": []}
+    return {"messages": messages}
 
 
 @app.get("/api/health")
@@ -405,10 +555,18 @@ async def health():
 
 
 @app.post("/api/preview_skills")
-async def preview_skills(payload: dict):
-    """Stateless preview: ask the Rust kernel which skills would match a draft
-    message so the UI can render a picker before the user actually sends it."""
+async def preview_skills(
+    payload: dict,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     session_id = payload.get("session_id", "")
+    if session_id:
+        owner = await db.get_session_owner(session_id)
+        if owner is not None and owner != current_user["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Session not owned by you",
+            )
     text = payload.get("text", "")
     top_k = int(payload.get("top_k", 8))
     try:
@@ -462,7 +620,7 @@ class _ChatInputIterator:
         return item
 
 
-def _chat_output_to_json(out: agent_pb2.ChatOutput) -> Optional[Dict[str, Any]]:
+def _chat_output_to_json(out: agent_pb2.ChatOutput):
     field = out.WhichOneof("payload")
     if field == "text_delta":
         return {"type": "text_delta", "content": out.text_delta.content}

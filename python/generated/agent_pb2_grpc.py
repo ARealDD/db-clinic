@@ -63,6 +63,11 @@ class AgentServiceStub(object):
                 request_serializer=agent__pb2.PreviewSkillsRequest.SerializeToString,
                 response_deserializer=agent__pb2.PreviewSkillsResponse.FromString,
                 _registered_method=True)
+        self.ResumeSession = channel.unary_unary(
+                '/agent.AgentService/ResumeSession',
+                request_serializer=agent__pb2.ResumeSessionRequest.SerializeToString,
+                response_deserializer=agent__pb2.ResumeSessionResponse.FromString,
+                _registered_method=True)
 
 
 class AgentServiceServicer(object):
@@ -111,6 +116,14 @@ class AgentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ResumeSession(self, request, context):
+        """Resume a previously persisted session from its JSONL file.
+        Loads conversation history so the agent can continue where it left off.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AgentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -138,6 +151,11 @@ def add_AgentServiceServicer_to_server(servicer, server):
                     servicer.PreviewSkills,
                     request_deserializer=agent__pb2.PreviewSkillsRequest.FromString,
                     response_serializer=agent__pb2.PreviewSkillsResponse.SerializeToString,
+            ),
+            'ResumeSession': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResumeSession,
+                    request_deserializer=agent__pb2.ResumeSessionRequest.FromString,
+                    response_serializer=agent__pb2.ResumeSessionResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -279,6 +297,33 @@ class AgentService(object):
             '/agent.AgentService/PreviewSkills',
             agent__pb2.PreviewSkillsRequest.SerializeToString,
             agent__pb2.PreviewSkillsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResumeSession(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/agent.AgentService/ResumeSession',
+            agent__pb2.ResumeSessionRequest.SerializeToString,
+            agent__pb2.ResumeSessionResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -86,16 +86,20 @@ SERVICE_STATUS_SERVING: ServiceStatus
 SERVICE_STATUS_NOT_SERVING: ServiceStatus
 
 class CreateSessionRequest(_message.Message):
-    __slots__ = ("model", "system_prompts", "config", "api_config")
+    __slots__ = ("model", "system_prompts", "config", "api_config", "data_dir", "user_id")
     MODEL_FIELD_NUMBER: _ClassVar[int]
     SYSTEM_PROMPTS_FIELD_NUMBER: _ClassVar[int]
     CONFIG_FIELD_NUMBER: _ClassVar[int]
     API_CONFIG_FIELD_NUMBER: _ClassVar[int]
+    DATA_DIR_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
     model: str
     system_prompts: _containers.RepeatedScalarFieldContainer[str]
     config: SessionConfig
     api_config: ApiConfig
-    def __init__(self, model: _Optional[str] = ..., system_prompts: _Optional[_Iterable[str]] = ..., config: _Optional[_Union[SessionConfig, _Mapping]] = ..., api_config: _Optional[_Union[ApiConfig, _Mapping]] = ...) -> None: ...
+    data_dir: str
+    user_id: str
+    def __init__(self, model: _Optional[str] = ..., system_prompts: _Optional[_Iterable[str]] = ..., config: _Optional[_Union[SessionConfig, _Mapping]] = ..., api_config: _Optional[_Union[ApiConfig, _Mapping]] = ..., data_dir: _Optional[str] = ..., user_id: _Optional[str] = ...) -> None: ...
 
 class ApiConfig(_message.Message):
     __slots__ = ("provider", "api_key", "base_url")
@@ -128,6 +132,34 @@ class CreateSessionResponse(_message.Message):
     session_id: str
     created_at_ms: int
     def __init__(self, session_id: _Optional[str] = ..., created_at_ms: _Optional[int] = ...) -> None: ...
+
+class ResumeSessionRequest(_message.Message):
+    __slots__ = ("session_id", "data_dir", "model", "system_prompts", "api_config", "config", "user_id")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    DATA_DIR_FIELD_NUMBER: _ClassVar[int]
+    MODEL_FIELD_NUMBER: _ClassVar[int]
+    SYSTEM_PROMPTS_FIELD_NUMBER: _ClassVar[int]
+    API_CONFIG_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    data_dir: str
+    model: str
+    system_prompts: _containers.RepeatedScalarFieldContainer[str]
+    api_config: ApiConfig
+    config: SessionConfig
+    user_id: str
+    def __init__(self, session_id: _Optional[str] = ..., data_dir: _Optional[str] = ..., model: _Optional[str] = ..., system_prompts: _Optional[_Iterable[str]] = ..., api_config: _Optional[_Union[ApiConfig, _Mapping]] = ..., config: _Optional[_Union[SessionConfig, _Mapping]] = ..., user_id: _Optional[str] = ...) -> None: ...
+
+class ResumeSessionResponse(_message.Message):
+    __slots__ = ("session_id", "created_at_ms", "loaded_messages")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_MS_FIELD_NUMBER: _ClassVar[int]
+    LOADED_MESSAGES_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    created_at_ms: int
+    loaded_messages: int
+    def __init__(self, session_id: _Optional[str] = ..., created_at_ms: _Optional[int] = ..., loaded_messages: _Optional[int] = ...) -> None: ...
 
 class CloseSessionRequest(_message.Message):
     __slots__ = ("session_id",)
@@ -348,14 +380,20 @@ class TurnComplete(_message.Message):
     def __init__(self, messages: _Optional[_Iterable[_Union[ConversationMessage, _Mapping]]] = ..., turn_usage: _Optional[_Union[TokenUsage, _Mapping]] = ..., stop_reason: _Optional[_Union[TurnStopReason, str]] = ...) -> None: ...
 
 class ErrorEvent(_message.Message):
-    __slots__ = ("code", "message", "recoverable")
+    __slots__ = ("code", "message", "recoverable", "failure_class", "request_id", "provider_status")
     CODE_FIELD_NUMBER: _ClassVar[int]
     MESSAGE_FIELD_NUMBER: _ClassVar[int]
     RECOVERABLE_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_CLASS_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    PROVIDER_STATUS_FIELD_NUMBER: _ClassVar[int]
     code: ErrorCode
     message: str
     recoverable: bool
-    def __init__(self, code: _Optional[_Union[ErrorCode, str]] = ..., message: _Optional[str] = ..., recoverable: bool = ...) -> None: ...
+    failure_class: str
+    request_id: str
+    provider_status: int
+    def __init__(self, code: _Optional[_Union[ErrorCode, str]] = ..., message: _Optional[str] = ..., recoverable: bool = ..., failure_class: _Optional[str] = ..., request_id: _Optional[str] = ..., provider_status: _Optional[int] = ...) -> None: ...
 
 class TokenUsage(_message.Message):
     __slots__ = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
