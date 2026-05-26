@@ -10,6 +10,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 header { background: #16213e; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460; }
 header h1 { font-size: 18px; color: #e94560; }
 header a { color: #4ecca3; text-decoration: none; font-size: 14px; }
+header .logout { color: #e94560; text-decoration: none; font-size: 14px; margin-left: 16px; }
 header a:hover { text-decoration: underline; }
 .container { max-width: 600px; margin: 32px auto; padding: 0 24px; width: 100%; }
 .card { background: #16213e; border: 1px solid #0f3460; border-radius: 12px; padding: 24px; }
@@ -38,7 +39,10 @@ header a:hover { text-decoration: underline; }
 
 <header>
   <h1>Settings</h1>
-  <a href="/">&#8592; Back to Chat</a>
+  <div>
+    <a href="/">&#8592; Back to Chat</a>
+    <a href="/login" class="logout">Logout</a>
+  </div>
 </header>
 
 <div class="container">
@@ -96,6 +100,26 @@ header a:hover { text-decoration: underline; }
 </div>
 
 <script>
+// ---------- Auth helpers ----------
+function getToken() { return localStorage.getItem('jwt_token'); }
+function authFetch(url, opts) {
+  opts = opts || {};
+  const h = new Headers(opts.headers || {});
+  const t = getToken();
+  if (t) h.set('Authorization', 'Bearer ' + t);
+  if (opts.body) h.set('Content-Type', 'application/json');
+  opts.headers = h;
+  return fetch(url, opts);
+}
+function checkAuth() {
+  if (!getToken()) { window.location.href = '/login'; return false; }
+  return true;
+}
+function logout() {
+  localStorage.removeItem('jwt_token');
+  window.location.href = '/login';
+}
+
 const providerEl = document.getElementById('provider');
 const apiKeyEl = document.getElementById('api_key');
 const baseUrlEl = document.getElementById('base_url');
@@ -144,9 +168,8 @@ document.getElementById('save-btn').addEventListener('click', async () => {
   if (!modelEl.value) { showStatus('Please enter a model name.', false); return; }
 
   try {
-    const resp = await fetch('/api/config', {
+    const resp = await authFetch('/api/config', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         provider: providerEl.value,
         api_key: apiKeyEl.value,
@@ -174,9 +197,8 @@ document.getElementById('test-btn').addEventListener('click', async () => {
   showStatus('Testing connection...', true);
 
   try {
-    await fetch('/api/config', {
+    await authFetch('/api/config', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         provider: providerEl.value,
         api_key: apiKeyEl.value,
@@ -186,7 +208,7 @@ document.getElementById('test-btn').addEventListener('click', async () => {
       })
     });
 
-    const sessionResp = await fetch('/api/sessions', { method: 'POST' });
+    const sessionResp = await authFetch('/api/sessions', { method: 'POST' });
     const session = await sessionResp.json();
     if (!session.session_id) {
       showStatus('Failed to create session: ' + JSON.stringify(session), false);
@@ -194,7 +216,7 @@ document.getElementById('test-btn').addEventListener('click', async () => {
     }
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(proto + '//' + location.host + '/ws/chat/' + session.session_id);
+    const ws = new WebSocket(proto + '//' + location.host + '/ws/chat/' + session.session_id + '?token=' + encodeURIComponent(getToken()));
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'user_message', content: 'Hello, reply with a single word: working.' }));
@@ -207,15 +229,15 @@ document.getElementById('test-btn').addEventListener('click', async () => {
         gotResponse = true;
         showStatus('Connection successful! LLM responded.', true);
         ws.close();
-        fetch('/api/sessions/' + session.session_id, { method: 'DELETE' });
+        fetch('/api/sessions/' + session.session_id, { method: 'DELETE', headers: new Headers({ 'Authorization': 'Bearer ' + getToken() }) });
       } else if (msg.type === 'error') {
         showStatus('LLM error: ' + msg.message, false);
         ws.close();
-        fetch('/api/sessions/' + session.session_id, { method: 'DELETE' });
+        fetch('/api/sessions/' + session.session_id, { method: 'DELETE', headers: new Headers({ 'Authorization': 'Bearer ' + getToken() }) });
       } else if (msg.type === 'turn_complete' && !gotResponse) {
         showStatus('Turn completed but no text received. Check model/config.', false);
         ws.close();
-        fetch('/api/sessions/' + session.session_id, { method: 'DELETE' });
+        fetch('/api/sessions/' + session.session_id, { method: 'DELETE', headers: new Headers({ 'Authorization': 'Bearer ' + getToken() }) });
       }
     };
 
@@ -227,7 +249,7 @@ document.getElementById('test-btn').addEventListener('click', async () => {
       if (!gotResponse) {
         showStatus('Timeout — no response within 15s.', false);
         ws.close();
-        fetch('/api/sessions/' + session.session_id, { method: 'DELETE' });
+        fetch('/api/sessions/' + session.session_id, { method: 'DELETE', headers: new Headers({ 'Authorization': 'Bearer ' + getToken() }) });
       }
     }, 15000);
 
@@ -238,7 +260,8 @@ document.getElementById('test-btn').addEventListener('click', async () => {
 
 async function loadConfig() {
   try {
-    const resp = await fetch('/api/config');
+    const resp = await authFetch('/api/config');
+    if (resp.status === 401) { logout(); return; }
     const data = await resp.json();
     if (data.provider) providerEl.value = data.provider;
     if (data.base_url) baseUrlEl.value = data.base_url;
@@ -250,7 +273,7 @@ async function loadConfig() {
     });
   } catch (e) {}
 }
-loadConfig();
+if (checkAuth()) loadConfig();
 </script>
 </body>
 </html>

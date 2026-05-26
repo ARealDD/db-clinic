@@ -100,6 +100,9 @@ REQUIRED_PYTHON_PKGS=(
   "websockets:websockets"
   "pydantic:pydantic"
   "PyYAML:yaml"
+  "bcrypt:bcrypt"
+  "python-jose:jose"
+  "aiosqlite:aiosqlite"
 )
 
 echo "Checking Python dependencies..."

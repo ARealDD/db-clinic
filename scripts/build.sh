@@ -67,11 +67,12 @@ if $BUILD_ALL; then
   cd "$REPO_ROOT"
   python -c "
 import importlib, sys
-required = ['grpc', 'grpc_tools', 'fastapi', 'uvicorn', 'pydantic', 'yaml']
+required = ['grpc', 'grpc_tools', 'fastapi', 'uvicorn', 'pydantic', 'yaml', 'bcrypt', 'jose', 'aiosqlite']
 pkg_map = {
     'grpc': 'grpcio',
     'grpc_tools': 'grpcio-tools',
     'yaml': 'PyYAML',
+    'jose': 'python-jose',
 }
 missing = []
 for mod in required:
