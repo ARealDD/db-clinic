@@ -175,7 +175,10 @@ impl SessionManager {
                                 ) {
                                     Ok((c, sink)) => (AnyApiClient::Real(Box::new(c)), Some(sink)),
                                     Err(e) => {
-                                        eprintln!("failed to create real API client: {e}, falling back to mock");
+                                        tracing::warn!(
+                                            error = %e,
+                                            "failed to create real API client, falling back to mock"
+                                        );
                                         (AnyApiClient::Mock(MockApiClient::new()), None)
                                     }
                                 }
@@ -246,18 +249,47 @@ impl SessionManager {
                                     .cancel_flag
                                     .store(false, std::sync::atomic::Ordering::Relaxed);
                                 if let Some(sink) = &entry.event_sink {
-                                    *sink.lock().unwrap() = Some(event_tx);
+                                    let mut guard =
+                                        sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    *guard = Some(event_tx);
                                 }
                                 let augmented = if let Some(ctx) = skill_context {
                                     format!("{ctx}\n\n---\n\n{user_text}")
                                 } else {
                                     user_text
                                 };
-                                let result = entry.runtime.run_turn(&augmented, None);
+                                // Isolate runtime panics: a single bad session
+                                // shouldn't kill the actor thread and orphan
+                                // every other live session. AssertUnwindSafe is
+                                // justified because the actor is single-threaded
+                                // (we own &mut entry.runtime here) and on the
+                                // panic branch we always null the sink before
+                                // returning.
+                                let outcome = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                        entry.runtime.run_turn(&augmented, None)
+                                    }),
+                                );
                                 if let Some(sink) = &entry.event_sink {
-                                    *sink.lock().unwrap() = None;
+                                    let mut guard =
+                                        sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    *guard = None;
                                 }
-                                result
+                                match outcome {
+                                    Ok(result) => result,
+                                    Err(payload) => {
+                                        let msg = panic_message(&payload);
+                                        tracing::error!(
+                                            session_id = %session_id,
+                                            panic_message = %msg,
+                                            "runtime panicked inside run_turn"
+                                        );
+                                        Err(RuntimeError::Internal {
+                                            source: "runtime panic",
+                                            message: msg,
+                                        })
+                                    }
+                                }
                             });
                             let _ = reply.send(result);
                         }
@@ -416,4 +448,14 @@ impl SessionManager {
     pub fn uptime_seconds(&self) -> u64 {
         self.start_time.elapsed().as_secs()
     }
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
 }

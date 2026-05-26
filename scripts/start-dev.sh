@@ -59,7 +59,7 @@ fi
 # ---- Step 2: Start Rust gRPC server ----
 echo "=== Starting Rust gRPC server ==="
 cd "$REPO_ROOT/rust"
-cargo run -p agent-grpc-server -- --addr "$GRPC_ADDR" --skills-dir "$REPO_ROOT/skills" $MOCK_FLAG &
+cargo run -p agent-grpc-server -- --addr "$GRPC_ADDR" --skills-dir "$REPO_ROOT/skills" --config "$REPO_ROOT/config.toml" $MOCK_FLAG &
 GRPC_PID=$!
 
 echo "Waiting for gRPC server..."

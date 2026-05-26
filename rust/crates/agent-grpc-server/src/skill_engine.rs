@@ -207,17 +207,17 @@ impl SkillEngine {
             Self::load_dir(&knowledge_dir, SkillType::Knowledge, &mut skills);
         }
 
-        eprintln!(
-            "[SkillEngine] loaded {} skills ({} case, {} knowledge)",
-            skills.len(),
-            skills
+        tracing::info!(
+            total = skills.len(),
+            case = skills
                 .iter()
                 .filter(|s| s.skill_type == SkillType::Case)
                 .count(),
-            skills
+            knowledge = skills
                 .iter()
                 .filter(|s| s.skill_type == SkillType::Knowledge)
                 .count(),
+            "loaded skills"
         );
 
         Arc::new(Self { skills })
@@ -236,7 +236,7 @@ impl SkillEngine {
                     if let Some(skill) = load_skill_from_file(&skill_md, skill_type) {
                         out.push(skill);
                     } else {
-                        eprintln!("[SkillEngine] skipped {}: parse failed", skill_md.display());
+                        tracing::warn!(path = %skill_md.display(), "skipped skill: parse failed");
                     }
                 }
             }

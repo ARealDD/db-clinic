@@ -308,6 +308,13 @@ message ErrorEvent {
   string message = 2;
   // Whether the error is recoverable (client can retry or send new input).
   bool recoverable = 3;
+  // Distilled `ApiError::safe_failure_class()` (e.g. "context_window",
+  // "provider_rate_limit"). Empty when the failure was not an LLM API error.
+  string failure_class = 4;
+  // Provider-supplied request id, when available.
+  string request_id = 5;
+  // HTTP status from the provider, when available. 0 = not present.
+  uint32 provider_status = 6;
 }
 
 enum ErrorCode {

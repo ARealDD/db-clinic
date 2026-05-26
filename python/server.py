@@ -2,7 +2,8 @@
 """FastAPI gateway for DB Diagnosis Assistant — Python 3.9 compatible."""
 from __future__ import annotations
 
-import sys, os, json, queue, threading, logging
+import sys, os, json, queue, threading, logging, logging.handlers
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,8 +24,66 @@ import auth as auth_mod
 import db
 from models import UserRegister, UserLogin, TokenResponse, UserResponse, LLMConfig
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+try:
+    import tomllib  # Python 3.11+
+except ImportError:  # pragma: no cover - fallback for older interpreters
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None  # type: ignore[assignment]
+
+_DEFAULT_LOG_CFG = {"dir": "logs", "gateway_prefix": "gateway", "retention_days": 14}
+
+
+def _load_log_cfg() -> Dict[str, Any]:
+    cfg_path = Path(_PROJECT_ROOT) / "config.toml"
+    if tomllib is None:
+        return dict(_DEFAULT_LOG_CFG)
+    try:
+        with cfg_path.open("rb") as f:
+            data = tomllib.load(f)
+        return {**_DEFAULT_LOG_CFG, **data.get("logging", {})}
+    except FileNotFoundError:
+        return dict(_DEFAULT_LOG_CFG)
+    except Exception as exc:  # pragma: no cover - defensive
+        sys.stderr.write(f"config.toml parse error: {exc}; using defaults\n")
+        return dict(_DEFAULT_LOG_CFG)
+
+
+_log_cfg = _load_log_cfg()
+_log_dir = Path(_log_cfg["dir"])
+if not _log_dir.is_absolute():
+    _log_dir = Path(_PROJECT_ROOT) / _log_dir
+_log_dir.mkdir(parents=True, exist_ok=True)
+
+_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+_root = logging.getLogger()
+_root.setLevel(logging.INFO)
+# uvicorn may have already attached a handler when running under --reload;
+# clear so we don't double-emit when we install our own pair below.
+for _h in list(_root.handlers):
+    _root.removeHandler(_h)
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_fmt)
+_root.addHandler(_console_handler)
+
+_file_handler = logging.handlers.TimedRotatingFileHandler(
+    filename=str(_log_dir / f"{_log_cfg['gateway_prefix']}.log"),
+    when="midnight",
+    backupCount=int(_log_cfg["retention_days"]),
+    encoding="utf-8",
+)
+_file_handler.setFormatter(_fmt)
+_root.addHandler(_file_handler)
+
 log = logging.getLogger("gateway")
+log.info(
+    "logging initialised (stdout + daily rolling file) dir=%s prefix=%s retention_days=%s",
+    _log_dir,
+    _log_cfg["gateway_prefix"],
+    _log_cfg["retention_days"],
+)
 
 GRPC_ADDR = os.environ.get("GRPC_ADDR", "localhost:50051")
 
@@ -55,6 +114,14 @@ async def _no_cache_html(request: Request, call_next):
 
 @app.on_event("startup")
 async def _startup_init_db():
+    # uvicorn installs its own handlers on these loggers with propagate=False,
+    # so without rerouting they would never reach our file handler. Strip the
+    # uvicorn handlers and let the records bubble up to root so both sinks
+    # (console + file) receive them exactly once.
+    for _name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        _lg = logging.getLogger(_name)
+        _lg.handlers.clear()
+        _lg.propagate = True
     await db.init_db()
 
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")

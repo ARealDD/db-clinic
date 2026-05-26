@@ -120,7 +120,7 @@ impl AgentService for AgentServiceImpl {
             guard.insert(session_id.clone(), (instruction_rx, timeout_rx));
         }
 
-        eprintln!("created session {session_id} (model={model}, mock={mock_mode})");
+        tracing::info!(%session_id, %model, mock_mode, "created session");
 
         Ok(Response::new(proto::CreateSessionResponse {
             session_id,
@@ -164,6 +164,9 @@ impl AgentService for AgentServiceImpl {
                                 code: proto::ErrorCode::ErrorInternal.into(),
                                 message: "empty payload in ChatInput".to_string(),
                                 recoverable: true,
+                                failure_class: String::new(),
+                                request_id: String::new(),
+                                provider_status: 0,
                             })),
                         }))
                         .await;
@@ -211,6 +214,9 @@ impl AgentService for AgentServiceImpl {
                                                 proxy_result.instruction_id, session_id,
                                             ),
                                             recoverable: true,
+                                            failure_class: String::new(),
+                                            request_id: String::new(),
+                                            provider_status: 0,
                                         },
                                     )),
                                 }))
@@ -257,7 +263,7 @@ impl AgentService for AgentServiceImpl {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        eprintln!("closed session {session_id}");
+        tracing::info!(%session_id, "closed session");
 
         Ok(Response::new(proto::CloseSessionResponse {
             total_usage: usage.map(|u| convert::runtime_usage_to_proto(&u)),
@@ -515,6 +521,9 @@ async fn handle_user_message(
                     code: proto::ErrorCode::ErrorSessionNotFound.into(),
                     message: format!("session {session_id} not found"),
                     recoverable: false,
+                    failure_class: String::new(),
+                    request_id: String::new(),
+                    provider_status: 0,
                 })),
             }))
             .await;
@@ -566,16 +575,74 @@ async fn handle_user_message(
                 .await;
         }
         Err(err) => {
+            let error_event = runtime_error_to_event(&err);
             let _ = tx
                 .send(Ok(proto::ChatOutput {
                     session_id: session_id.to_string(),
-                    payload: Some(proto::chat_output::Payload::Error(proto::ErrorEvent {
-                        code: proto::ErrorCode::ErrorLlmApiFailure.into(),
-                        message: err.to_string(),
-                        recoverable: true,
-                    })),
+                    payload: Some(proto::chat_output::Payload::Error(error_event)),
                 }))
                 .await;
         }
+    }
+}
+
+fn runtime_error_to_event(err: &runtime::RuntimeError) -> proto::ErrorEvent {
+    use runtime::RuntimeError;
+    let (code, recoverable, failure_class, request_id, provider_status) = match err {
+        RuntimeError::ApiFailure(api) => {
+            let class = api.class.as_str();
+            let code = match class {
+                "context_window" => proto::ErrorCode::ErrorContextTooLong,
+                "provider_rate_limit" => proto::ErrorCode::ErrorLlmRateLimited,
+                _ => proto::ErrorCode::ErrorLlmApiFailure,
+            };
+            let recoverable = match class {
+                "provider_auth" => false,
+                _ => api.retryable || class == "context_window",
+            };
+            (
+                code,
+                recoverable,
+                api.class.clone(),
+                api.request_id.clone().unwrap_or_default(),
+                u32::from(api.status.unwrap_or(0)),
+            )
+        }
+        RuntimeError::ToolFailure { .. } => (
+            proto::ErrorCode::ErrorToolExecutionFailed,
+            true,
+            String::new(),
+            String::new(),
+            0,
+        ),
+        RuntimeError::SessionState(_) | RuntimeError::Internal { .. } => (
+            proto::ErrorCode::ErrorInternal,
+            false,
+            String::new(),
+            String::new(),
+            0,
+        ),
+        RuntimeError::MaxIterations | RuntimeError::Cancelled | RuntimeError::Other(_) => (
+            proto::ErrorCode::ErrorInternal,
+            true,
+            String::new(),
+            String::new(),
+            0,
+        ),
+        RuntimeError::StreamInvalid(_) => (
+            proto::ErrorCode::ErrorLlmApiFailure,
+            true,
+            String::new(),
+            String::new(),
+            0,
+        ),
+    };
+    proto::ErrorEvent {
+        code: code.into(),
+        message: err.to_string(),
+        recoverable,
+        failure_class,
+        request_id,
+        provider_status,
     }
 }

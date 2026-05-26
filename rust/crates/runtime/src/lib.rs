@@ -13,6 +13,7 @@ mod compact;
 mod config;
 pub mod config_validate;
 mod conversation;
+mod error;
 mod file_ops;
 pub mod g004_conformance;
 mod git_context;
@@ -77,9 +78,10 @@ pub use config_validate::{
 };
 pub use conversation::{
     auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent,
-    ConversationRuntime, PromptCacheEvent, RuntimeError, StaticToolExecutor, ToolError,
-    ToolExecutor, TurnSummary,
+    ConversationRuntime, PromptCacheEvent, StaticToolExecutor, ToolError, ToolExecutor,
+    TurnSummary,
 };
+pub use error::{ApiFailure, RuntimeError};
 pub use file_ops::{
     edit_file, edit_file_in_workspace, glob_search, glob_search_in_workspace, grep_search,
     grep_search_in_workspace, read_file, read_file_in_workspace, write_file,

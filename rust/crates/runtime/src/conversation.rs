@@ -88,28 +88,7 @@ impl Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
-/// Error returned when a conversation turn cannot be completed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeError {
-    message: String,
-}
-
-impl RuntimeError {
-    #[must_use]
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl Display for RuntimeError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for RuntimeError {}
+use crate::error::RuntimeError;
 
 /// Summary of one completed runtime turn, including tool results and usage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,7 +323,7 @@ where
         // ROADMAP #38: Session-health canary - probe if context was compacted
         if self.session.compaction.is_some() {
             if let Err(error) = self.run_session_health_probe() {
-                return Err(RuntimeError::new(format!(
+                return Err(RuntimeError::SessionState(format!(
                     "Session health probe failed after compaction: {error}. \
                      The session may be in an inconsistent state. \
                      Consider starting a fresh session with /session new."
@@ -355,7 +334,7 @@ where
         self.record_turn_started(&user_input);
         self.session
             .push_user_text(user_input)
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
+            .map_err(|error| RuntimeError::SessionState(error.to_string()))?;
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
@@ -365,16 +344,14 @@ where
         loop {
             iterations += 1;
             if iterations > self.max_iterations {
-                let error = RuntimeError::new(
-                    "conversation loop exceeded the maximum number of iterations",
-                );
+                let error = RuntimeError::MaxIterations;
                 self.record_turn_failed(iterations, &error);
                 return Err(error);
             }
 
             if let Some(signal) = &self.cancel_signal {
                 if signal.load(Ordering::Relaxed) {
-                    let error = RuntimeError::new("turn cancelled");
+                    let error = RuntimeError::Cancelled;
                     self.record_turn_failed(iterations, &error);
                     return Err(error);
                 }
@@ -421,7 +398,7 @@ where
 
             self.session
                 .push_message(assistant_message.clone())
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
+                .map_err(|error| RuntimeError::SessionState(error.to_string()))?;
             assistant_messages.push(assistant_message);
 
             if pending_tool_uses.is_empty() {
@@ -524,7 +501,7 @@ where
                 };
                 self.session
                     .push_message(result_message.clone())
-                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                    .map_err(|error| RuntimeError::SessionState(error.to_string()))?;
                 self.record_tool_finished(iterations, &result_message);
                 tool_results.push(result_message);
             }
@@ -778,12 +755,14 @@ fn build_assistant_message(
     flush_text_block(&mut text, &mut blocks);
 
     if !finished {
-        return Err(RuntimeError::new(
-            "assistant stream ended without a message stop event",
+        return Err(RuntimeError::StreamInvalid(
+            "assistant stream ended without a message stop event".to_string(),
         ));
     }
     if blocks.is_empty() {
-        return Err(RuntimeError::new("assistant stream produced no content"));
+        return Err(RuntimeError::StreamInvalid(
+            "assistant stream produced no content".to_string(),
+        ));
     }
 
     Ok((
