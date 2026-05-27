@@ -14,6 +14,7 @@ api = { path = "../api" }
 prost = "0.13"
 regex = "1"
 runtime = { path = "../runtime" }
+session-persistence = { path = "../session-persistence" }
 indexmap = { version = "1", features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true
