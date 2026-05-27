@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sys, os, json, queue, threading, logging, logging.handlers
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "generated"))
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 import auth as auth_mod
 import db
 from models import UserRegister, UserLogin, TokenResponse, UserResponse, LLMConfig
+from tool_usage_guidance import TOOL_USAGE_GUIDANCE
 
 try:
     import tomllib  # Python 3.11+
@@ -32,7 +34,13 @@ except ImportError:  # pragma: no cover - fallback for older interpreters
     except ImportError:
         tomllib = None  # type: ignore[assignment]
 
-_DEFAULT_LOG_CFG = {"dir": "logs", "gateway_prefix": "gateway", "retention_days": 14}
+_DEFAULT_LOG_CFG = {
+    "dir": "logs",
+    "gateway_prefix": "gateway",
+    "retention_days": 14,
+    "prompt_log_dir": "logs/prompts",
+    "prompt_log_prefix_gateway": "prompt-gateway",
+}
 
 
 def _load_log_cfg() -> Dict[str, Any]:
@@ -83,6 +91,35 @@ log.info(
     _log_dir,
     _log_cfg["gateway_prefix"],
     _log_cfg["retention_days"],
+)
+
+# Prompt log: a separate JSONL sink so operators can replay the *exact*
+# user-typed payload the gateway forwarded to the kernel for each turn. We
+# keep this logger isolated (propagate=False, no formatter beyond %(message)s)
+# so the raw JSON line is preserved verbatim. The kernel emits a sibling row
+# from `prompt_log.rs`; both rows share `session_id` for cross-correlation.
+_prompt_log_dir = Path(_log_cfg["prompt_log_dir"])
+if not _prompt_log_dir.is_absolute():
+    _prompt_log_dir = Path(_PROJECT_ROOT) / _prompt_log_dir
+_prompt_log_dir.mkdir(parents=True, exist_ok=True)
+
+prompt_log = logging.getLogger("gateway.prompt")
+prompt_log.setLevel(logging.INFO)
+prompt_log.propagate = False
+for _h in list(prompt_log.handlers):
+    prompt_log.removeHandler(_h)
+_prompt_file_handler = logging.handlers.TimedRotatingFileHandler(
+    filename=str(_prompt_log_dir / f"{_log_cfg['prompt_log_prefix_gateway']}.log"),
+    when="midnight",
+    backupCount=int(_log_cfg["retention_days"]),
+    encoding="utf-8",
+)
+_prompt_file_handler.setFormatter(logging.Formatter("%(message)s"))
+prompt_log.addHandler(_prompt_file_handler)
+log.info(
+    "prompt logging initialised dir=%s prefix=%s",
+    _prompt_log_dir,
+    _log_cfg["prompt_log_prefix_gateway"],
 )
 
 GRPC_ADDR = os.environ.get("GRPC_ADDR", "localhost:50051")
@@ -203,24 +240,84 @@ async def me(current_user: Dict[str, Any] = Depends(get_current_user)):
 # ---------- Per-user LLM config ----------
 
 async def _get_user_llm_config(user_id: int) -> LLMConfig:
-    """Load the LLM config for a given user from the database."""
+    """Load the LLM config for a given user from the database.
+
+    Migration: when the new three-segment keys are absent, the legacy
+    `llm_system_prompt` row is promoted into the Role slot so the operator's
+    saved prompt is not lost on first read after the upgrade.
+    """
     configs = await db.get_all_user_configs(user_id)
+    role = configs.get("llm_system_prompt_role")
+    if role is None:
+        legacy = configs.get("llm_system_prompt")
+        role = legacy if legacy is not None else "You are a database diagnosis assistant."
     return LLMConfig(
         provider=configs.get("llm_provider", ""),
         api_key=configs.get("llm_api_key", ""),
         base_url=configs.get("llm_base_url", ""),
         model=configs.get("llm_model", ""),
-        system_prompt=configs.get("llm_system_prompt", "You are a database diagnosis assistant."),
+        system_prompt_role=role,
+        system_prompt_background=configs.get("llm_system_prompt_background", ""),
+        system_prompt_rules=configs.get("llm_system_prompt_rules", ""),
     )
 
 
 async def _save_user_llm_config(user_id: int, config: LLMConfig) -> None:
-    """Save the LLM config for a given user to the database."""
+    """Save the LLM config for a given user to the database.
+
+    Writes the three new segment keys. The legacy `llm_system_prompt` row is
+    left dormant (it stays as a one-release fallback for the migration above).
+    """
     await db.set_user_config(user_id, "llm_provider", config.provider)
     await db.set_user_config(user_id, "llm_api_key", config.api_key)
     await db.set_user_config(user_id, "llm_base_url", config.base_url)
     await db.set_user_config(user_id, "llm_model", config.model)
-    await db.set_user_config(user_id, "llm_system_prompt", config.system_prompt)
+    await db.set_user_config(user_id, "llm_system_prompt_role", config.system_prompt_role)
+    await db.set_user_config(user_id, "llm_system_prompt_background", config.system_prompt_background)
+    await db.set_user_config(user_id, "llm_system_prompt_rules", config.system_prompt_rules)
+
+
+def _assemble_system_segments(config: LLMConfig) -> list:
+    """Drop empty segments and return the ordered list that becomes
+    `system_prompts` on the proto. Order matters — the Rust kernel
+    joins them with `\\n\\n` in this order: role, background, rules,
+    TOOL_USAGE_GUIDANCE (appended kernel-side)."""
+    segments = [
+        config.system_prompt_role,
+        config.system_prompt_background,
+        config.system_prompt_rules,
+    ]
+    return [s for s in segments if s and s.strip()]
+
+
+def _log_prompt(
+    session_id: str,
+    user: Dict[str, Any],
+    model: str,
+    provider: str,
+    raw_text: str,
+    context_attachments: List[Dict[str, Any]],
+) -> None:
+    """Emit a single JSONL row capturing exactly what the gateway received from
+    the operator (pre any kernel-side augmentation). Best-effort: a logging
+    failure must never block a turn — wrap everything and swallow."""
+    try:
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            ),
+            "side": "gateway",
+            "session_id": session_id,
+            "user_id": user.get("id"),
+            "username": user.get("username"),
+            "model": model,
+            "provider": provider,
+            "raw_user_text": raw_text,
+            "context_attachments": context_attachments,
+        }
+        prompt_log.info(json.dumps(row, ensure_ascii=False))
+    except Exception:  # pragma: no cover - defensive
+        log.exception("failed to emit gateway prompt JSONL row")
 
 
 # ---------- REST endpoints ----------
@@ -262,12 +359,37 @@ async def get_config(
         "provider": config.provider,
         "model": config.model,
         "base_url": config.base_url,
-        "system_prompt": config.system_prompt,
+        "system_prompt_role": config.system_prompt_role,
+        "system_prompt_background": config.system_prompt_background,
+        "system_prompt_rules": config.system_prompt_rules,
         "has_api_key": bool(config.api_key),
     }
 
 
 _SESSION_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+@app.get("/api/system_prompt/preview")
+async def preview_system_prompt(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Return the assembled system prompt the LLM will actually see for new
+    sessions opened by this user, including the kernel-appended
+    `TOOL_USAGE_GUIDANCE` block. Empty segments are dropped so the previewed
+    string matches the `\\n\\n`-joined output produced by the Rust kernel."""
+    config = await _get_user_llm_config(current_user["id"])
+    segments = _assemble_system_segments(config)
+    if not segments:
+        segments = ["You are a database diagnosis assistant."]
+    all_segments = segments + [TOOL_USAGE_GUIDANCE]
+    assembled = "\n\n".join(all_segments)
+    return {
+        "assembled": assembled,
+        "segments": {
+            "role": config.system_prompt_role,
+            "background": config.system_prompt_background,
+            "rules": config.system_prompt_rules,
+            "tool_usage_guidance": TOOL_USAGE_GUIDANCE,
+        },
+    }
 
 
 @app.post("/api/sessions")
@@ -276,7 +398,9 @@ async def create_session(
 ):
     config = await _get_user_llm_config(current_user["id"])
     model = config.model or "mock"
-    system_prompt = config.system_prompt or "You are a database diagnosis assistant."
+    system_prompts = _assemble_system_segments(config) or [
+        "You are a database diagnosis assistant."
+    ]
 
     api_config = None
     if config.api_key:
@@ -291,7 +415,7 @@ async def create_session(
             stub = agent_pb2_grpc.AgentServiceStub(ch)
             resp = stub.CreateSession(agent_pb2.CreateSessionRequest(
                 model=model,
-                system_prompts=[system_prompt],
+                system_prompts=system_prompts,
                 api_config=api_config,
                 data_dir=_SESSION_DATA_DIR,
                 user_id=current_user["username"],
@@ -341,7 +465,9 @@ async def fork_session(
 
     config = await _get_user_llm_config(current_user["id"])
     model = config.model or "mock"
-    base_prompt = config.system_prompt or "You are a database diagnosis assistant."
+    base_segments = _assemble_system_segments(config) or [
+        "You are a database diagnosis assistant."
+    ]
 
     if selected_units:
         context_block = "\n\n".join(
@@ -374,7 +500,7 @@ async def fork_session(
         stub = agent_pb2_grpc.AgentServiceStub(ch)
         resp = stub.CreateSession(agent_pb2.CreateSessionRequest(
             model=model,
-            system_prompts=[base_prompt, fork_prompt],
+            system_prompts=base_segments + [fork_prompt],
             api_config=api_config,
         ))
     log.info(
@@ -440,7 +566,9 @@ async def resume_session(
         )
     config = await _get_user_llm_config(current_user["id"])
     model = config.model or "mock"
-    system_prompt = config.system_prompt or "You are a database diagnosis assistant."
+    system_prompts = _assemble_system_segments(config) or [
+        "You are a database diagnosis assistant."
+    ]
 
     api_config = None
     if config.api_key:
@@ -458,7 +586,7 @@ async def resume_session(
                 data_dir=_SESSION_DATA_DIR,
                 user_id=current_user["username"],
                 model=model,
-                system_prompts=[system_prompt],
+                system_prompts=system_prompts,
                 api_config=api_config,
             ))
     except grpc.RpcError as e:
@@ -777,6 +905,18 @@ async def ws_chat(ws: WebSocket, session_id: str):
                     "session %s: user_message len=%d context=%d",
                     session_id, len(content), len(context_attachments),
                 )
+                try:
+                    _user_cfg = await _get_user_llm_config(int(user_id))
+                    _log_prompt(
+                        session_id=session_id,
+                        user=user,
+                        model=_user_cfg.model,
+                        provider=_user_cfg.provider,
+                        raw_text=content,
+                        context_attachments=context_attachments,
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    log.exception("prompt logging failed for session %s", session_id)
                 proto_attachments = []
                 for a in context_attachments:
                     raw_meta = a.get("metadata") or {}

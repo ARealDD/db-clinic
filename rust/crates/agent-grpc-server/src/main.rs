@@ -4,6 +4,7 @@ mod convert;
 mod instruction_card;
 mod local_executor;
 mod mock;
+mod prompt_log;
 mod proxy_executor;
 mod real_client;
 mod service;
@@ -53,26 +54,43 @@ fn main() {
         .map_or_else(|| PathBuf::from("config.toml"), PathBuf::from);
 
     let cfg = config::load(&config_path);
-    let log_dir = if cfg.logging.dir.is_absolute() {
-        cfg.logging.dir.clone()
-    } else {
-        config_path
-            .parent()
-            .map(|p| p.join(&cfg.logging.dir))
-            .unwrap_or_else(|| cfg.logging.dir.clone())
+    let resolve_log_dir = |dir: &std::path::Path| -> PathBuf {
+        if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            config_path
+                .parent()
+                .map(|p| p.join(dir))
+                .unwrap_or_else(|| dir.to_path_buf())
+        }
     };
+    let log_dir = resolve_log_dir(&cfg.logging.dir);
+    let prompt_log_dir = resolve_log_dir(&cfg.logging.prompt_log_dir);
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         eprintln!(
             "failed to create log dir {}: {e}; file logging disabled",
             log_dir.display()
         );
     }
+    if let Err(e) = std::fs::create_dir_all(&prompt_log_dir) {
+        eprintln!(
+            "failed to create prompt log dir {}: {e}; prompt logging disabled",
+            prompt_log_dir.display()
+        );
+    }
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, &cfg.logging.grpc_prefix);
     let (file_writer, _file_guard) = tracing_appender::non_blocking(file_appender);
 
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Second appender — *only* receives JSONL prompt records via prompt_log.
+    // Kept off the tracing subscriber so framework log lines never land in
+    // the prompt log file (operators tail it with `jq -c`).
+    let prompt_appender =
+        tracing_appender::rolling::daily(&prompt_log_dir, &cfg.logging.prompt_log_prefix_grpc);
+    let (prompt_writer, _prompt_guard) = tracing_appender::non_blocking(prompt_appender);
+    prompt_log::init(prompt_writer);
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stdout)
         .with_target(true);
@@ -90,8 +108,10 @@ fn main() {
     tracing::info!(
         log_dir = %log_dir.display(),
         prefix = %cfg.logging.grpc_prefix,
+        prompt_log_dir = %prompt_log_dir.display(),
+        prompt_log_prefix = %cfg.logging.prompt_log_prefix_grpc,
         config = %config_path.display(),
-        "logging initialised (stdout + daily rolling file)"
+        "logging initialised (stdout + daily rolling file + per-turn prompt JSONL)"
     );
 
     let data_dir: PathBuf = args

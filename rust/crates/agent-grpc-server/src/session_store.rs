@@ -4,13 +4,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use runtime::{ApiClient, ApiRequest, AssistantEvent, RuntimeError};
-use session_persistence::{
-    Checkpoint, SessionBackend, SessionRecord,
-};
+use session_persistence::{Checkpoint, SessionBackend, SessionRecord};
 
 use crate::composite_executor::CompositeToolExecutor;
 use crate::local_executor::LocalToolExecutor;
 use crate::mock::MockApiClient;
+use crate::prompt_log::PromptLogObserver;
 use crate::proxy_executor::{
     PendingMap, ProxyInstructionEvent, ProxyResultPayload, ProxyTimeoutEvent, ProxyToolExecutor,
 };
@@ -50,6 +49,20 @@ impl ApiClient for AnyApiClient {
         match self {
             Self::Mock(c) => c.stream(request),
             Self::Real(c) => c.stream(request),
+        }
+    }
+
+    fn model(&self) -> &str {
+        match self {
+            Self::Mock(c) => c.model(),
+            Self::Real(c) => c.model(),
+        }
+    }
+
+    fn provider(&self) -> &str {
+        match self {
+            Self::Mock(c) => c.provider(),
+            Self::Real(c) => c.provider(),
         }
     }
 }
@@ -102,7 +115,7 @@ pub struct ProxyChannels {
 
 #[allow(dead_code)]
 enum SessionCmd {
-Create {
+    Create {
         model: String,
         system_prompts: Vec<String>,
         max_iterations: Option<usize>,
@@ -138,7 +151,7 @@ Create {
         proxy_channels: ProxyChannels,
         reply: CmdResult<Result<(String, u64, usize), String>>,
     },
-ListBackend {
+    ListBackend {
         reply: CmdResult<Vec<SessionRecord>>,
     },
 }
@@ -215,46 +228,47 @@ impl SessionManager {
                 };
                 while let Ok(cmd) = cmd_rx.recv() {
                     match cmd {
-SessionCmd::Create {
-        model,
-        mut system_prompts,
-        max_iterations,
-        api_config,
-        proxy_channels,
-        data_dir,
-        user_id,
-        reply,
-    } => {
-    let mut session = runtime::Session::new();
-    let workspace_root = if let Some(dir) = data_dir {
-        let root = std::path::PathBuf::from(&dir);
-        session = session.with_workspace_root(root.clone());
-        let sessions_dir = if let Some(uid) = &user_id {
-            root.join("sessions").join(uid)
-        } else {
-            root.join("sessions")
-        };
-        std::fs::create_dir_all(&sessions_dir).ok();
-        let path = sessions_dir.join(format!("{}.jsonl", session.session_id));
-        session = session.with_persistence_path(path);
-        Some(root)
-    } else {
-        None
-    };
-    let session_id = session.session_id.clone();
-    let created_at_ms = session.created_at_ms;
-    system_prompts.push(TOOL_USAGE_GUIDANCE.to_string());
+                        SessionCmd::Create {
+                                model,
+                                mut system_prompts,
+                                max_iterations,
+                                api_config,
+                                proxy_channels,
+                                data_dir,
+                                user_id,
+                                reply,
+                            } => {
+                            let mut session = runtime::Session::new();
+                            let workspace_root = if let Some(dir) = data_dir {
+                                let root = std::path::PathBuf::from(&dir);
+                                session = session.with_workspace_root(root.clone());
+                                let sessions_dir = if let Some(uid) = &user_id {
+                                    root.join("sessions").join(uid)
+                                } else {
+                                    root.join("sessions")
+                                };
+                                std::fs::create_dir_all(&sessions_dir).ok();
+                                let path = sessions_dir.join(format!("{}.jsonl", session.session_id));
+                                session = session.with_persistence_path(path);
+                                Some(root)
+                            } else {
+                                None
+                            };
+                            let session_id = session.session_id.clone();
+                            let created_at_ms = session.created_at_ms;
+                            inject_diagnosis_context(&mut system_prompts);
+                            system_prompts.push(TOOL_USAGE_GUIDANCE.to_string());
 
-    save_session_meta_to_backend(
-        &*backend,
-        &session_id,
-        created_at_ms,
-        Some(&model),
-        workspace_root.as_deref(),
-        None,
-        None,
-        user_id.as_deref(),
-    );
+                            save_session_meta_to_backend(
+                                &*backend,
+                                &session_id,
+                                created_at_ms,
+                                Some(&model),
+                                workspace_root.as_deref(),
+                                None,
+                                None,
+                                user_id.as_deref(),
+                            );
 
                             let tool_definitions = build_tool_definitions();
                             let (api_client, event_sink) = if let Some(cfg) = api_config {
@@ -300,7 +314,8 @@ SessionCmd::Create {
                                 policy,
                                 system_prompts,
                             )
-                            .with_cancel_signal(cancel_flag.clone());
+                            .with_cancel_signal(cancel_flag.clone())
+                            .with_turn_observer(Arc::new(PromptLogObserver));
                             if let Some(max) = max_iterations {
                                 rt = rt.with_max_iterations(max);
                             }
@@ -353,8 +368,9 @@ if let Some(Err(e)) = store.sessions.get(&session_id)
                                     .cancel_flag
                                     .store(false, std::sync::atomic::Ordering::Relaxed);
                                 if let Some(sink) = &entry.event_sink {
-                                    let mut guard =
-                                        sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    let mut guard = sink
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                                     *guard = Some(event_tx);
                                 }
                                 let augmented = if let Some(ctx) = skill_context {
@@ -362,6 +378,13 @@ if let Some(Err(e)) = store.sessions.get(&session_id)
                                 } else {
                                     user_text
                                 };
+                                // Isolate runtime panics: a single bad session
+                                // shouldn't kill the actor thread and orphan
+                                // every other live session. AssertUnwindSafe is
+                                // justified because the actor is single-threaded
+                                // (we own &mut entry.runtime here) and on the
+                                // panic branch we always null the sink before
+                                // returning.
                                 let step_before = entry.step_index;
                                 let outcome = std::panic::catch_unwind(
                                     std::panic::AssertUnwindSafe(|| {
@@ -370,8 +393,9 @@ if let Some(Err(e)) = store.sessions.get(&session_id)
                                 );
                                 entry.step_index += 1;
                                 if let Some(sink) = &entry.event_sink {
-                                    let mut guard =
-                                        sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    let mut guard = sink
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                                     *guard = None;
                                 }
                                 let result = match outcome {
@@ -409,20 +433,14 @@ if let Some(Err(e)) = store.sessions.get(&session_id)
                             });
                             let _ = reply.send(result);
                         }
-                        SessionCmd::GetUsage {
-                            session_id,
-                            reply,
-                        } => {
+                        SessionCmd::GetUsage { session_id, reply } => {
                             let usage = store
                                 .sessions
                                 .get(&session_id)
                                 .map(|entry| entry.runtime.usage().cumulative_usage());
                             let _ = reply.send(usage);
                         }
-                        SessionCmd::Remove {
-                            session_id,
-                            reply,
-                        } => {
+                        SessionCmd::Remove { session_id, reply } => {
                             let removed = store.sessions.remove(&session_id).is_some();
                             if let Ok(mut g) = shared.lock() {
                                 g.remove(&session_id);
@@ -473,6 +491,7 @@ SessionCmd::Resume {
                             let msg_count = session.messages.len();
                             let created_at_ms = session.created_at_ms;
                             let sid = session.session_id.clone();
+                            inject_diagnosis_context(&mut system_prompts);
                             system_prompts.push(TOOL_USAGE_GUIDANCE.to_string());
 
 save_session_meta_to_backend(
@@ -703,7 +722,7 @@ store.sessions.insert(
         rx.recv().expect("session-manager thread gone")
     }
 
-pub fn resume_session(
+    pub fn resume_session(
         &self,
         session_id: &str,
         data_dir: &str,
@@ -746,6 +765,42 @@ pub fn resume_session(
 
     pub fn uptime_seconds(&self) -> u64 {
         self.start_time.elapsed().as_secs()
+    }
+}
+
+/// Pre-pends the diagnosis-mode environment / actions / instruction context to
+/// `system_prompts` (after the user's role/background/rules segments, before
+/// the kernel's `TOOL_USAGE_GUIDANCE`).
+///
+/// Best-effort: if any step fails (cwd unreadable, instruction-file IO error)
+/// we log at `debug` and leave `system_prompts` untouched — the session still
+/// runs with just the user's segments and `TOOL_USAGE_GUIDANCE`. A logging
+/// failure must never prevent a session from being created.
+fn inject_diagnosis_context(system_prompts: &mut Vec<String>) {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(error = %e, "diagnosis prompt: cwd unavailable, skipping injection");
+            return;
+        }
+    };
+    let date = runtime::today_utc_ymd();
+    let sections = match runtime::load_diagnosis_system_prompt(
+        &cwd,
+        date,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(error = %e, "diagnosis prompt: section build failed, skipping injection");
+            return;
+        }
+    };
+    for section in sections {
+        if !section.trim().is_empty() {
+            system_prompts.push(section);
+        }
     }
 }
 

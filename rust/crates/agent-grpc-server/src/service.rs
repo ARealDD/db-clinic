@@ -43,7 +43,11 @@ pub struct AgentServiceImpl {
 }
 
 impl AgentServiceImpl {
-    pub fn new(mock_mode: bool, skills_root: Option<PathBuf>, backend: Arc<dyn SessionBackend>) -> Self {
+    pub fn new(
+        mock_mode: bool,
+        skills_root: Option<PathBuf>,
+        backend: Arc<dyn SessionBackend>,
+    ) -> Self {
         let skill_engine = if let Some(root) = skills_root {
             SkillEngine::load(&root)
         } else {
@@ -109,8 +113,16 @@ impl AgentService for AgentServiceImpl {
                 max_iterations,
                 api_config,
                 proxy_channels,
-                if req.data_dir.is_empty() { None } else { Some(req.data_dir) },
-                if req.user_id.is_empty() { None } else { Some(req.user_id) },
+                if req.data_dir.is_empty() {
+                    None
+                } else {
+                    Some(req.data_dir)
+                },
+                if req.user_id.is_empty() {
+                    None
+                } else {
+                    Some(req.user_id)
+                },
             )
         })
         .await

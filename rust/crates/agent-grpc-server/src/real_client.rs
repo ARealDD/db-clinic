@@ -119,6 +119,14 @@ fn emit(sink: &EventSink, event: &AssistantEvent) {
 }
 
 impl ApiClient for RealApiClient {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let messages = convert_messages(&request.messages);
         let system =

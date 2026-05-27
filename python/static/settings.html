@@ -21,7 +21,7 @@ header a:hover { text-decoration: underline; }
 .field select:focus, .field input:focus, .field textarea:focus { border-color: #e94560; }
 .field .hint { font-size: 12px; color: #666; margin-top: 4px; }
 .field textarea { resize: vertical; min-height: 60px; }
-.actions { display: flex; gap: 12px; margin-top: 20px; }
+.actions { display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
 .btn { padding: 10px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; }
 .btn-primary { background: #e94560; color: #fff; }
 .btn-primary:hover { background: #c73650; }
@@ -33,6 +33,27 @@ header a:hover { text-decoration: underline; }
 .presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
 .preset-chip { padding: 6px 14px; background: #1a1a2e; border: 1px solid #0f3460; border-radius: 20px; font-size: 12px; cursor: pointer; color: #aaa; transition: all 0.15s; }
 .preset-chip:hover, .preset-chip.active { border-color: #e94560; color: #e94560; }
+
+/* Nested module: the three segments visually belong to one System Prompt unit. */
+.subcard { background: #11192e; border: 1px solid #0f3460; border-radius: 10px; padding: 18px 18px 14px; margin: 4px 0 18px; }
+.subcard-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+.subcard-header h3 { font-size: 14px; color: #4ecca3; font-weight: 600; letter-spacing: 0.02em; }
+.subcard-header .subcard-hint { font-size: 11px; color: #6a7090; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.subcard-intro { font-size: 12px; color: #8890a8; margin-bottom: 14px; line-height: 1.5; }
+.segment { position: relative; padding-left: 28px; }
+.segment + .segment { margin-top: 10px; }
+.segment-num { position: absolute; left: 0; top: 4px; width: 20px; height: 20px; border-radius: 50%; background: #0f3460; color: #4ecca3; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.segment label { display: block; font-size: 13px; color: #c5c5d0; margin-bottom: 6px; font-weight: 500; }
+.segment label .segment-sub { color: #6a7090; font-weight: 400; font-size: 12px; margin-left: 4px; }
+.segment textarea { width: 100%; padding: 10px 12px; border: 1px solid #0f3460; border-radius: 8px; background: #1a1a2e; color: #e0e0e0; font-size: 14px; outline: none; font-family: inherit; resize: vertical; min-height: 90px; }
+.segment textarea:focus { border-color: #e94560; }
+.segment .hint { font-size: 11px; color: #6a7090; margin-top: 4px; }
+.segment-joiner { display: flex; align-items: center; gap: 10px; margin: 8px 0 8px 28px; color: #4a5070; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.segment-joiner::before, .segment-joiner::after { content: ''; flex: 1; height: 0; border-top: 1px dashed #2a3450; }
+.subcard-footer { margin-top: 14px; padding-top: 14px; border-top: 1px solid #1a2342; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.subcard-footer .footer-note { font-size: 11px; color: #6a7090; }
+.subcard-footer .btn { padding: 8px 16px; font-size: 13px; }
+#preview-pane { display: none; margin-top: 14px; padding: 14px; background: #0c0c1a; border: 1px solid #0f3460; border-radius: 8px; color: #c5c5d0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -85,9 +106,48 @@ header a:hover { text-decoration: underline; }
       <input type="text" id="model" placeholder="e.g., gpt-4o, claude-sonnet-4-20250514">
     </div>
 
-    <div class="field">
-      <label for="system_prompt">System Prompt</label>
-      <textarea id="system_prompt">You are a database diagnosis assistant.</textarea>
+    <div class="subcard">
+      <div class="subcard-header">
+        <h3>System Prompt</h3>
+        <span class="subcard-hint">role + background + rules → joined by \n\n</span>
+      </div>
+      <div class="subcard-intro">
+        The three segments below are concatenated in order and sent as the
+        system prompt for every new session. Leave a segment empty to drop it
+        from the join.
+      </div>
+
+      <div class="segment">
+        <span class="segment-num">1</span>
+        <label for="system_prompt_role">角色 <span class="segment-sub">Role</span></label>
+        <textarea id="system_prompt_role">You are a database diagnosis assistant.</textarea>
+        <div class="hint">Who the assistant is. Stays roughly stable across sessions.</div>
+      </div>
+
+      <div class="segment-joiner">\n\n</div>
+
+      <div class="segment">
+        <span class="segment-num">2</span>
+        <label for="system_prompt_background">背景 <span class="segment-sub">Background</span></label>
+        <textarea id="system_prompt_background" placeholder="Optional context about your environment, stack, or current investigation."></textarea>
+        <div class="hint">Domain context the assistant should assume — db engines, scale, recent incidents.</div>
+      </div>
+
+      <div class="segment-joiner">\n\n</div>
+
+      <div class="segment">
+        <span class="segment-num">3</span>
+        <label for="system_prompt_rules">规则 <span class="segment-sub">Rules</span></label>
+        <textarea id="system_prompt_rules" placeholder="Optional hard constraints: forbidden actions, response shape, escalation policy."></textarea>
+        <div class="hint">Hard rules the assistant must follow. Appended after Background.</div>
+      </div>
+
+      <div class="subcard-footer">
+        <span class="footer-note">Preview shows the assembled prompt including the kernel's built-in tool-usage guidance.</span>
+        <button class="btn btn-secondary" id="preview-btn">Preview full prompt</button>
+      </div>
+
+      <pre id="preview-pane"></pre>
     </div>
 
     <div class="actions">
@@ -124,8 +184,23 @@ const providerEl = document.getElementById('provider');
 const apiKeyEl = document.getElementById('api_key');
 const baseUrlEl = document.getElementById('base_url');
 const modelEl = document.getElementById('model');
-const systemPromptEl = document.getElementById('system_prompt');
+const sysRoleEl = document.getElementById('system_prompt_role');
+const sysBackgroundEl = document.getElementById('system_prompt_background');
+const sysRulesEl = document.getElementById('system_prompt_rules');
+const previewPane = document.getElementById('preview-pane');
 const statusMsg = document.getElementById('status-msg');
+
+function currentConfigBody() {
+  return {
+    provider: providerEl.value,
+    api_key: apiKeyEl.value,
+    base_url: baseUrlEl.value,
+    model: modelEl.value,
+    system_prompt_role: sysRoleEl.value,
+    system_prompt_background: sysBackgroundEl.value,
+    system_prompt_rules: sysRulesEl.value,
+  };
+}
 
 const presetDefaults = {
   anthropic: { base_url: 'https://api.anthropic.com', model: 'claude-sonnet-4-20250514' },
@@ -170,13 +245,7 @@ document.getElementById('save-btn').addEventListener('click', async () => {
   try {
     const resp = await authFetch('/api/config', {
       method: 'POST',
-      body: JSON.stringify({
-        provider: providerEl.value,
-        api_key: apiKeyEl.value,
-        base_url: baseUrlEl.value,
-        model: modelEl.value,
-        system_prompt: systemPromptEl.value,
-      })
+      body: JSON.stringify(currentConfigBody())
     });
     const data = await resp.json();
     if (data.ok) {
@@ -186,6 +255,27 @@ document.getElementById('save-btn').addEventListener('click', async () => {
     }
   } catch (e) {
     showStatus('Error: ' + e.message, false);
+  }
+});
+
+document.getElementById('preview-btn').addEventListener('click', async () => {
+  // Save first so the preview reflects what's actually in the DB. Skip if
+  // required fields are missing — partial state is fine for a preview.
+  try {
+    if (providerEl.value && apiKeyEl.value && modelEl.value) {
+      await authFetch('/api/config', {
+        method: 'POST',
+        body: JSON.stringify(currentConfigBody())
+      });
+    }
+    const resp = await authFetch('/api/system_prompt/preview');
+    if (resp.status === 401) { logout(); return; }
+    const data = await resp.json();
+    previewPane.textContent = data.assembled || '(empty)';
+    previewPane.style.display = 'block';
+    showStatus('Preview shown — this is what the LLM will see for new sessions.', true);
+  } catch (e) {
+    showStatus('Preview failed: ' + e.message, false);
   }
 });
 
@@ -199,13 +289,7 @@ document.getElementById('test-btn').addEventListener('click', async () => {
   try {
     await authFetch('/api/config', {
       method: 'POST',
-      body: JSON.stringify({
-        provider: providerEl.value,
-        api_key: apiKeyEl.value,
-        base_url: baseUrlEl.value,
-        model: modelEl.value,
-        system_prompt: systemPromptEl.value,
-      })
+      body: JSON.stringify(currentConfigBody())
     });
 
     const sessionResp = await authFetch('/api/sessions', { method: 'POST' });
@@ -266,7 +350,9 @@ async function loadConfig() {
     if (data.provider) providerEl.value = data.provider;
     if (data.base_url) baseUrlEl.value = data.base_url;
     if (data.model) modelEl.value = data.model;
-    if (data.system_prompt) systemPromptEl.value = data.system_prompt;
+    if (typeof data.system_prompt_role === 'string') sysRoleEl.value = data.system_prompt_role;
+    if (typeof data.system_prompt_background === 'string') sysBackgroundEl.value = data.system_prompt_background;
+    if (typeof data.system_prompt_rules === 'string') sysRulesEl.value = data.system_prompt_rules;
     if (data.has_api_key) apiKeyEl.placeholder = '(saved — enter to change)';
     document.querySelectorAll('.preset-chip').forEach(c => {
       c.classList.toggle('active', c.dataset.provider === data.provider);

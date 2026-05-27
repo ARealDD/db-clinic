@@ -19,6 +19,13 @@ pub struct LoggingConfig {
     #[serde(default = "default_retention")]
     #[allow(dead_code)]
     pub retention_days: u32,
+    // Per-turn full-prompt JSONL log. Lives in its own directory so it can be
+    // tailed / grepped without competing with tracing's rolling file. Daily
+    // rotation; no retention enforcement on the Rust side (same caveat as `dir`).
+    #[serde(default = "default_prompt_log_dir")]
+    pub prompt_log_dir: PathBuf,
+    #[serde(default = "default_prompt_log_prefix_grpc")]
+    pub prompt_log_prefix_grpc: String,
 }
 
 impl Default for LoggingConfig {
@@ -27,6 +34,8 @@ impl Default for LoggingConfig {
             dir: default_log_dir(),
             grpc_prefix: default_grpc_prefix(),
             retention_days: default_retention(),
+            prompt_log_dir: default_prompt_log_dir(),
+            prompt_log_prefix_grpc: default_prompt_log_prefix_grpc(),
         }
     }
 }
@@ -41,6 +50,14 @@ fn default_grpc_prefix() -> String {
 
 fn default_retention() -> u32 {
     14
+}
+
+fn default_prompt_log_dir() -> PathBuf {
+    PathBuf::from("logs/prompts")
+}
+
+fn default_prompt_log_prefix_grpc() -> String {
+    "prompt-grpc".to_string()
 }
 
 pub fn load(path: &Path) -> AppConfig {
