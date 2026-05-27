@@ -58,7 +58,7 @@ export default function Settings() {
 
   useEffect(() => {
     if (!user) return;
-    api<LLMConfig>(`/api/config?user_id=${encodeURIComponent(user.id)}`)
+    api<LLMConfig>('/api/config')
       .then((data) => {
         if (data.provider) setProvider(data.provider);
         if (data.base_url) setBaseUrl(data.base_url);
@@ -93,7 +93,7 @@ export default function Settings() {
     try {
       await api('/api/config', {
         method: 'POST',
-        body: { user_id: user?.id, provider, api_key: apiKey, base_url: baseUrl, model, system_prompt: systemPrompt },
+        body: { provider, api_key: apiKey, base_url: baseUrl, model, system_prompt: systemPrompt },
       });
       setStatus('Configuration saved! Redirecting to chat...');
       setStatusOk(true);
@@ -112,10 +112,10 @@ export default function Settings() {
     try {
       await api('/api/config', {
         method: 'POST',
-        body: { user_id: user?.id, provider, api_key: apiKey, base_url: baseUrl, model, system_prompt: systemPrompt },
+        body: { provider, api_key: apiKey, base_url: baseUrl, model, system_prompt: systemPrompt },
       });
 
-      const session = await api<{ session_id: string }>('/api/sessions', { method: 'POST', body: { user_id: user?.id } });
+      const session = await api<{ session_id: string }>('/api/sessions', { method: 'POST' });
       if (!session.session_id) {
         setStatus('Failed to create session'); setStatusOk(false);
         return;

@@ -177,10 +177,7 @@ export default function Chat() {
 
   // Check API config on mount
   useEffect(() => {
-    const raw = localStorage.getItem('db_clinic_user');
-    const uid = raw ? (JSON.parse(raw) as { id: string }).id : '';
-    const query = uid ? `?user_id=${encodeURIComponent(uid)}` : '';
-    api<LLMConfig>(`/api/config${query}`)
+    api<LLMConfig>('/api/config')
       .then((cfg) => {
         dispatch({ type: 'config_checked', hasApiKey: cfg.has_api_key });
         if (!cfg.has_api_key) {
@@ -213,7 +210,6 @@ export default function Chat() {
     setStatus('initializing');
     api<{ session_id: string }>('/api/sessions', {
       method: 'POST',
-      body: (() => { const r = localStorage.getItem('db_clinic_user'); return r ? { user_id: (JSON.parse(r) as { id: string }).id } : {}; })(),
     })
       .then((s) => {
         setSessionId(s.session_id);

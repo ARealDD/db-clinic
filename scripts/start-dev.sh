@@ -59,7 +59,7 @@ fi
 # ---- Step 2: Start Rust gRPC server ----
 echo "=== Starting Rust gRPC server ==="
 cd "$REPO_ROOT/rust"
-cargo run -p agent-grpc-server -- --addr "$GRPC_ADDR" --skills-dir "$REPO_ROOT/skills" $MOCK_FLAG &
+cargo run -p agent-grpc-server -- --addr "$GRPC_ADDR" --skills-dir "$REPO_ROOT/skills" --config "$REPO_ROOT/config.toml" $MOCK_FLAG &
 GRPC_PID=$!
 
 echo "Waiting for gRPC server..."
@@ -84,7 +84,15 @@ for i in $(seq 1 15); do
 done
 echo ""
 
-# ---- Step 3: Start Python FastAPI gateway ----
+# ---- Step 3: Install Python dependencies ----
+echo "=== Installing Python dependencies ==="
+pip3 install --quiet aiosqlite python-jose bcrypt cryptography 2>/dev/null \
+  || pip install --quiet aiosqlite python-jose bcrypt cryptography 2>/dev/null \
+  || python3 -m pip install --quiet aiosqlite python-jose bcrypt cryptography 2>/dev/null \
+  || python -m pip install --quiet aiosqlite python-jose bcrypt cryptography 2>/dev/null \
+  || { echo "WARNING: Could not install Python deps via pip; they may already be present or need manual install."; }
+
+# ---- Step 4: Start Python FastAPI gateway ----
 echo "=== Starting FastAPI gateway ==="
 cd "$REPO_ROOT/python"
 GRPC_ADDR="localhost:${GRPC_ADDR##*:}" \

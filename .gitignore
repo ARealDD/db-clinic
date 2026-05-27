@@ -37,3 +37,10 @@ tests/results/
 # Node.js / frontend
 ui/node_modules/
 ui/dist/
+
+# SQLite metadatabase (auto-created at startup)
+python/data/
+*.db
+
+# Rolling log files (created at startup by both Rust and Python services)
+logs/

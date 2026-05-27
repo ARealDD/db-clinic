@@ -18,6 +18,23 @@ type ProxyReceivers = (
     mpsc::Receiver<ProxyTimeoutEvent>,
 );
 
+/// Sentinel `ContextAttachment.source` value set by the frontend whenever the
+/// user has reviewed the skill picker — even if they unchecked everything.
+/// Its presence (regardless of whether any `SELECTED_SKILL_SOURCE` rows
+/// follow) tells the kernel "do NOT run auto-top-3, the operator already
+/// decided."
+const SKILL_SELECTION_MARKER: &str = "skill_selection";
+/// `ContextAttachment.source` for each individual selected skill row. The
+/// attachment's `content` is the skill id.
+const SELECTED_SKILL_SOURCE: &str = "selected_skill";
+/// `ContextAttachment.source` set by the frontend when an operator absorbs a
+/// fork pane's final answer back into its parent session. `content` holds the
+/// fork's last assistant text; `metadata["task"]` carries the fork's original
+/// one-line task description so the parent LLM can frame the report. We
+/// prepend a synthesized `[Fork report — task: ...]` block to the `user_text`
+/// before running the parent's next turn — see `handle_user_message`.
+const FORK_SUMMARY_SOURCE: &str = "fork_summary";
+
 pub struct AgentServiceImpl {
     manager: SessionManager,
     mock_mode: bool,
@@ -103,7 +120,7 @@ impl AgentService for AgentServiceImpl {
             guard.insert(session_id.clone(), (instruction_rx, timeout_rx));
         }
 
-        eprintln!("created session {session_id} (model={model}, mock={mock_mode})");
+        tracing::info!(%session_id, %model, mock_mode, "created session");
 
         Ok(Response::new(proto::CreateSessionResponse {
             session_id,
@@ -147,6 +164,9 @@ impl AgentService for AgentServiceImpl {
                                 code: proto::ErrorCode::ErrorInternal.into(),
                                 message: "empty payload in ChatInput".to_string(),
                                 recoverable: true,
+                                failure_class: String::new(),
+                                request_id: String::new(),
+                                provider_status: 0,
                             })),
                         }))
                         .await;
@@ -173,8 +193,12 @@ impl AgentService for AgentServiceImpl {
                         let output = proxy_result.output.clone();
                         let is_error = proxy_result.is_error;
                         let delivered = tokio::task::spawn_blocking(move || {
-                            manager_clone
-                                .deliver_proxy_result(&sid, &instruction_id, output, is_error)
+                            manager_clone.deliver_proxy_result(
+                                &sid,
+                                &instruction_id,
+                                output,
+                                is_error,
+                            )
                         })
                         .await
                         .unwrap_or(false);
@@ -190,6 +214,9 @@ impl AgentService for AgentServiceImpl {
                                                 proxy_result.instruction_id, session_id,
                                             ),
                                             recoverable: true,
+                                            failure_class: String::new(),
+                                            request_id: String::new(),
+                                            provider_status: 0,
                                         },
                                     )),
                                 }))
@@ -199,10 +226,9 @@ impl AgentService for AgentServiceImpl {
                     proto::chat_input::Payload::Cancel(_) => {
                         let manager_clone = manager.clone();
                         let sid = session_id.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            manager_clone.cancel_turn(&sid)
-                        })
-                        .await;
+                        let _ =
+                            tokio::task::spawn_blocking(move || manager_clone.cancel_turn(&sid))
+                                .await;
                     }
                 }
             }
@@ -237,7 +263,7 @@ impl AgentService for AgentServiceImpl {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        eprintln!("closed session {session_id}");
+        tracing::info!(%session_id, "closed session");
 
         Ok(Response::new(proto::CloseSessionResponse {
             total_usage: usage.map(|u| convert::runtime_usage_to_proto(&u)),
@@ -254,6 +280,37 @@ impl AgentService for AgentServiceImpl {
             uptime_seconds: self.manager.uptime_seconds(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }))
+    }
+
+    async fn preview_skills(
+        &self,
+        request: Request<proto::PreviewSkillsRequest>,
+    ) -> Result<Response<proto::PreviewSkillsResponse>, Status> {
+        let req = request.into_inner();
+        let text = req.text;
+        let top_k = if req.top_k == 0 {
+            8
+        } else {
+            req.top_k as usize
+        };
+        let engine = Arc::clone(self.manager.skill_engine());
+        let matched = tokio::task::spawn_blocking(move || engine.match_skills(&text, top_k))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(proto::PreviewSkillsResponse {
+            matches: matched.iter().map(matched_skill_to_proto).collect(),
+        }))
+    }
+}
+
+fn matched_skill_to_proto(m: &crate::skill_engine::MatchedSkill) -> proto::MatchedSkillInfo {
+    proto::MatchedSkillInfo {
+        skill_id: m.id.clone(),
+        skill_name: m.name.clone(),
+        category: m.category.clone(),
+        score: m.score,
+        skill_type: m.skill_type.as_str().to_string(),
+        description: m.description.clone(),
     }
 }
 
@@ -311,28 +368,79 @@ async fn handle_user_message(
     session_id: &str,
     user_msg: &proto::UserMessage,
 ) {
-    let user_text = user_msg.content.clone();
+    // Fork absorb path: when the operator clicks "Send result to parent" on a
+    // fork pane, the frontend posts a new user_message carrying the fork's
+    // final answer as a `fork_summary` ContextAttachment. We splice it in
+    // front of whatever the operator also typed (usually empty) so the parent
+    // LLM sees the fork report as fresh context for its next turn.
+    let fork_notes: Vec<String> = user_msg
+        .context
+        .iter()
+        .filter(|a| a.source == FORK_SUMMARY_SOURCE)
+        .map(|a| {
+            let task = a
+                .metadata
+                .get("task")
+                .map_or("(no task description)", String::as_str);
+            format!(
+                "[Fork report — task: {task}]\n{}\n[End fork report]",
+                a.content
+            )
+        })
+        .collect();
+
+    let user_text = if fork_notes.is_empty() {
+        user_msg.content.clone()
+    } else if user_msg.content.trim().is_empty() {
+        fork_notes.join("\n\n")
+    } else {
+        format!(
+            "{}\n\n---\n\nOperator note:\n{}",
+            fork_notes.join("\n\n"),
+            user_msg.content
+        )
+    };
     let skill_engine = Arc::clone(manager.skill_engine());
 
-    let user_text_for_match = user_text.clone();
-    let matched =
+    // UI path: the frontend has already shown a picker and recorded the
+    // operator's choice as `ContextAttachment`s on the user_message. CLI path:
+    // no marker → fall back to legacy auto-top-3 so rusty-claude-cli stays
+    // unchanged.
+    let has_selection_marker = user_msg
+        .context
+        .iter()
+        .any(|a| a.source == SKILL_SELECTION_MARKER);
+
+    let matched = if has_selection_marker {
+        let ids: Vec<String> = user_msg
+            .context
+            .iter()
+            .filter(|a| a.source == SELECTED_SKILL_SOURCE)
+            .map(|a| a.content.clone())
+            .collect();
+        if ids.is_empty() {
+            // Explicit "zero skills" — user reviewed and dismissed all matches.
+            Vec::new()
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                skill_engine.select_by_ids(&refs)
+            })
+            .await
+            .unwrap_or_default()
+        }
+    } else {
+        let user_text_for_match = user_text.clone();
         tokio::task::spawn_blocking(move || skill_engine.match_skills(&user_text_for_match, 3))
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+    };
 
     let skill_context = if matched.is_empty() {
         None
     } else {
-        let proto_skills: Vec<proto::MatchedSkillInfo> = matched
-            .iter()
-            .map(|m| proto::MatchedSkillInfo {
-                skill_id: m.id.clone(),
-                skill_name: m.name.clone(),
-                category: m.category.clone(),
-                score: m.score,
-                skill_type: m.skill_type.as_str().to_string(),
-            })
-            .collect();
+        let proto_skills: Vec<proto::MatchedSkillInfo> =
+            matched.iter().map(matched_skill_to_proto).collect();
 
         let _ = tx
             .send(Ok(proto::ChatOutput {
@@ -413,6 +521,9 @@ async fn handle_user_message(
                     code: proto::ErrorCode::ErrorSessionNotFound.into(),
                     message: format!("session {session_id} not found"),
                     recoverable: false,
+                    failure_class: String::new(),
+                    request_id: String::new(),
+                    provider_status: 0,
                 })),
             }))
             .await;
@@ -464,16 +575,74 @@ async fn handle_user_message(
                 .await;
         }
         Err(err) => {
+            let error_event = runtime_error_to_event(&err);
             let _ = tx
                 .send(Ok(proto::ChatOutput {
                     session_id: session_id.to_string(),
-                    payload: Some(proto::chat_output::Payload::Error(proto::ErrorEvent {
-                        code: proto::ErrorCode::ErrorLlmApiFailure.into(),
-                        message: err.to_string(),
-                        recoverable: true,
-                    })),
+                    payload: Some(proto::chat_output::Payload::Error(error_event)),
                 }))
                 .await;
         }
+    }
+}
+
+fn runtime_error_to_event(err: &runtime::RuntimeError) -> proto::ErrorEvent {
+    use runtime::RuntimeError;
+    let (code, recoverable, failure_class, request_id, provider_status) = match err {
+        RuntimeError::ApiFailure(api) => {
+            let class = api.class.as_str();
+            let code = match class {
+                "context_window" => proto::ErrorCode::ErrorContextTooLong,
+                "provider_rate_limit" => proto::ErrorCode::ErrorLlmRateLimited,
+                _ => proto::ErrorCode::ErrorLlmApiFailure,
+            };
+            let recoverable = match class {
+                "provider_auth" => false,
+                _ => api.retryable || class == "context_window",
+            };
+            (
+                code,
+                recoverable,
+                api.class.clone(),
+                api.request_id.clone().unwrap_or_default(),
+                u32::from(api.status.unwrap_or(0)),
+            )
+        }
+        RuntimeError::ToolFailure { .. } => (
+            proto::ErrorCode::ErrorToolExecutionFailed,
+            true,
+            String::new(),
+            String::new(),
+            0,
+        ),
+        RuntimeError::SessionState(_) | RuntimeError::Internal { .. } => (
+            proto::ErrorCode::ErrorInternal,
+            false,
+            String::new(),
+            String::new(),
+            0,
+        ),
+        RuntimeError::MaxIterations | RuntimeError::Cancelled | RuntimeError::Other(_) => (
+            proto::ErrorCode::ErrorInternal,
+            true,
+            String::new(),
+            String::new(),
+            0,
+        ),
+        RuntimeError::StreamInvalid(_) => (
+            proto::ErrorCode::ErrorLlmApiFailure,
+            true,
+            String::new(),
+            String::new(),
+            0,
+        ),
+    };
+    proto::ErrorEvent {
+        code: code.into(),
+        message: err.to_string(),
+        recoverable,
+        failure_class,
+        request_id,
+        provider_status,
     }
 }

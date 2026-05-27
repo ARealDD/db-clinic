@@ -1,0 +1,17 @@
+# Unified runtime configuration for db-clinic.
+# Both the Rust gRPC server and the Python FastAPI gateway read this file.
+
+[logging]
+# Directory where rolling log files are written. Resolved relative to the
+# repo root if not absolute. Created on startup if missing.
+dir = "logs"
+
+# Per-service file-name prefixes. Both services append a YYYY-MM-DD suffix.
+grpc_prefix = "agent-grpc-server"
+gateway_prefix = "gateway"
+
+# Number of past daily log files to retain. Older files are deleted on rotation.
+# Rust side: not currently enforced (tracing-appender's daily appender does not
+# self-prune; we accept this for now and document it). Python side: enforced
+# via TimedRotatingFileHandler's backupCount.
+retention_days = 14

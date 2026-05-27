@@ -16,7 +16,11 @@ export function useWebSocket(sessionId: string | null) {
 
     setStatus('connecting');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${sessionId}`);
+    const token = localStorage.getItem('db_clinic_token') || '';
+    const wsUrl = token
+      ? `${protocol}//${window.location.host}/ws/chat/${sessionId}?token=${encodeURIComponent(token)}`
+      : `${protocol}//${window.location.host}/ws/chat/${sessionId}`;
+    const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => setStatus('connected');
     ws.onclose = () => setStatus('disconnected');

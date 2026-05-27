@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use api::{
-    AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
+    AnthropicClient, ApiError, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
     MessageRequest, OpenAiCompatClient, OpenAiCompatConfig, OutputContentBlock, ProviderClient,
     StreamEvent, ToolDefinition, ToolResultContentBlock,
 };
 use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, MessageRole,
-    RuntimeError,
+    ApiClient, ApiFailure, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage,
+    MessageRole, RuntimeError,
 };
 
 pub type EventSink = Arc<Mutex<Option<std::sync::mpsc::Sender<AssistantEvent>>>>;
@@ -17,6 +17,7 @@ pub struct RealApiClient {
     runtime: tokio::runtime::Runtime,
     client: ProviderClient,
     model: String,
+    provider: String,
     event_sink: EventSink,
     tool_definitions: Vec<ToolDefinition>,
 }
@@ -72,12 +73,41 @@ impl RealApiClient {
                 runtime: rt,
                 client,
                 model: model.to_string(),
+                provider: provider.to_string(),
                 event_sink,
                 tool_definitions,
             },
             sink_clone,
         ))
     }
+}
+
+/// Distill an [`api::ApiError`] into a [`runtime::ApiFailure`] so the gateway
+/// can pick the right gRPC `ErrorCode` and surface the classification to the
+/// UI without re-parsing the error message.
+fn api_error_into_runtime(err: &ApiError, provider: &str) -> RuntimeError {
+    let class = err.safe_failure_class().to_string();
+    let retryable = err.is_retryable();
+    let request_id = err.request_id().map(str::to_string);
+    let status = match err {
+        ApiError::Api { status, .. } => Some(status.as_u16()),
+        ApiError::RetriesExhausted { last_error, .. } => {
+            if let ApiError::Api { status, .. } = last_error.as_ref() {
+                Some(status.as_u16())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    RuntimeError::ApiFailure(ApiFailure {
+        class,
+        retryable,
+        provider: Some(provider.to_string()),
+        status,
+        request_id,
+        message: err.to_string(),
+    })
 }
 
 fn emit(sink: &EventSink, event: &AssistantEvent) {
@@ -111,6 +141,7 @@ impl ApiClient for RealApiClient {
             &self.client,
             &message_request,
             &self.event_sink,
+            &self.provider,
         ))
     }
 }
@@ -120,11 +151,12 @@ async fn stream_and_collect(
     client: &ProviderClient,
     message_request: &MessageRequest,
     sink: &EventSink,
+    provider: &str,
 ) -> Result<Vec<AssistantEvent>, RuntimeError> {
     let mut stream = client
         .stream_message(message_request)
         .await
-        .map_err(|e| RuntimeError::new(e.to_string()))?;
+        .map_err(|e| api_error_into_runtime(&e, provider))?;
 
     let mut events = Vec::new();
     let mut pending_tools: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
@@ -134,7 +166,7 @@ async fn stream_and_collect(
     while let Some(event) = stream
         .next_event()
         .await
-        .map_err(|e| RuntimeError::new(e.to_string()))?
+        .map_err(|e| api_error_into_runtime(&e, provider))?
     {
         match event {
             StreamEvent::MessageStart(start) => {
