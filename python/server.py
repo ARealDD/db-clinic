@@ -8,10 +8,11 @@ import grpc
 import agent_pb2
 import agent_pb2_grpc
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+
+from python.db.manager import DatabaseManager
+from python.db.skill_service import SkillService
+from python.db.user_service import UserService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("gateway")
@@ -20,23 +21,33 @@ GRPC_ADDR = os.environ.get("GRPC_ADDR", "localhost:50051")
 
 app = FastAPI(title="Agent Gateway")
 
-app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+# Serve static assets (JS, CSS, images) from the build output.
+# For paths that don't resolve to a real file, serve index.html (SPA fallback).
+@app.get("/static/{path:path}")
+async def serve_static_or_spa(path: str):
+    file_path = os.path.join(STATIC_DIR, path)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+# ---------- Database ----------
+
+db = DatabaseManager()
+user_service = UserService(db)
+skill_service = SkillService(db)
+
+
+@app.on_event("startup")
+async def startup():
+    await db.initialize()
+    count = await db.seed_official_skills()
+    log.info("db initialized; seeded %d official skills", count)
 
 
 def _grpc_channel():
     return grpc.insecure_channel(GRPC_ADDR)
-
-
-# ---------- In-memory LLM config ----------
-
-class LLMConfig(BaseModel):
-    provider: str = ""
-    api_key: str = ""
-    base_url: str = ""
-    model: str = ""
-    system_prompt: str = "You are a database diagnosis assistant."
-
-_current_config = LLMConfig()
 
 
 # ---------- REST endpoints ----------
@@ -47,36 +58,46 @@ async def index():
 
 
 @app.post("/api/config")
-async def set_config(config: LLMConfig):
-    global _current_config
-    _current_config = config
-    log.info("config updated: provider=%s model=%s base_url=%s", config.provider, config.model, config.base_url)
+async def set_config(body: dict):
+    user_id = body.get("user_id", "")
+    if not user_id:
+        return {"error": "user_id required"}, 400
+    await user_service.save_api_config(user_id, body)
+    log.info("config updated for user %s: provider=%s model=%s", user_id, body.get("provider"), body.get("model"))
     return {"ok": True}
 
 
 @app.get("/api/config")
-async def get_config():
+async def get_config(user_id: str = ""):
+    if not user_id:
+        # Return empty config when no user is specified
+        return {"provider": "", "model": "", "base_url": "", "system_prompt": "", "has_api_key": False}
+    cfg = await user_service.get_api_config(user_id)
+    if cfg is None:
+        return {"provider": "", "model": "", "base_url": "", "system_prompt": "", "has_api_key": False}
     return {
-        "provider": _current_config.provider,
-        "model": _current_config.model,
-        "base_url": _current_config.base_url,
-        "system_prompt": _current_config.system_prompt,
-        "has_api_key": bool(_current_config.api_key),
+        "provider": cfg.get("provider", ""),
+        "model": cfg.get("model", ""),
+        "base_url": cfg.get("base_url", ""),
+        "system_prompt": cfg.get("system_prompt", ""),
+        "api_key": cfg.get("api_key", ""),
+        "has_api_key": bool(cfg.get("api_key", "")),
     }
 
 
 @app.post("/api/sessions")
-async def create_session():
-    cfg = _current_config
-    model = cfg.model or "mock"
-    system_prompt = cfg.system_prompt or "You are a database diagnosis assistant."
+async def create_session(body: dict = {}):
+    user_id = body.get("user_id", "")
+    cfg = await user_service.get_api_config(user_id) if user_id else None
+    model = cfg.get("model", "mock") if cfg else "mock"
+    system_prompt = cfg.get("system_prompt", "You are a database diagnosis assistant.") if cfg else "You are a database diagnosis assistant."
 
     api_config = None
-    if cfg.api_key:
+    if cfg and cfg.get("api_key"):
         api_config = agent_pb2.ApiConfig(
-            provider=cfg.provider,
-            api_key=cfg.api_key,
-            base_url=cfg.base_url,
+            provider=cfg.get("provider", ""),
+            api_key=cfg.get("api_key", ""),
+            base_url=cfg.get("base_url", ""),
         )
 
     with _grpc_channel() as ch:
@@ -86,7 +107,7 @@ async def create_session():
             system_prompts=[system_prompt],
             api_config=api_config,
         ))
-    log.info("created session %s (model=%s, has_api_config=%s)", resp.session_id, model, api_config is not None)
+    log.info("created session %s (user=%s, model=%s, has_api_config=%s)", resp.session_id, user_id, model, api_config is not None)
     return {"session_id": resp.session_id, "created_at_ms": resp.created_at_ms}
 
 
@@ -121,7 +142,128 @@ async def health():
         return {"status": "unavailable", "error": str(e)}
 
 
-# ---------- WebSocket chat ----------
+# ---------- User & Skill REST endpoints ----------
+
+
+@app.post("/api/login")
+async def login(body: dict):
+    username = body.get("username", "").strip()
+    if not username:
+        return {"error": "username required"}, 400
+    user = await user_service.login(username)
+    return user
+
+
+@app.get("/api/skills/square")
+async def get_skill_square(category: str = "", search: str = ""):
+    result = await skill_service.get_square_skills(
+        category=category or None,
+        search=search or None,
+    )
+    return result
+
+
+@app.get("/api/skills/mine")
+async def get_my_skills(user_id: str = ""):
+    if not user_id:
+        return {"error": "user_id required"}, 400
+    skills = await skill_service.get_user_skills(user_id)
+    active_ids = await skill_service.get_active_skill_ids(user_id)
+    return {"skills": skills, "active_ids": active_ids}
+
+
+@app.post("/api/skills")
+async def create_skill(body: dict):
+    user_id = body.get("user_id", "")
+    if not user_id:
+        return {"error": "user_id required"}, 400
+    skill = await skill_service.create_skill(user_id, body)
+    return skill
+
+
+@app.post("/api/skills/upload")
+async def upload_skill_file(user_id: str = Form(...), file: UploadFile = File(...)):
+    if not user_id:
+        return {"error": "user_id required"}, 400
+    content = await file.read()
+    # Write to temp file for parsing
+    import tempfile, pathlib
+    suffix = pathlib.Path(file.filename or "skill.md").suffix
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(content)
+        tmppath = tmp.name
+    try:
+        data = SkillService.parse_skill_file(tmppath)
+        skill = await skill_service.create_skill(user_id, data)
+        return skill
+    finally:
+        os.unlink(tmppath)
+
+
+@app.put("/api/skills")
+async def update_skill(body: dict):
+    skill_id = body.get("skill_id", "")
+    user_id = body.get("user_id", "")
+    if not skill_id:
+        return {"error": "skill_id required"}, 400
+    if not user_id:
+        return {"error": "user_id required"}, 400
+    skill = await skill_service.update_skill(skill_id, user_id, body)
+    if skill is None:
+        return {"error": "not found or not owned by user"}, 404
+    return skill
+
+
+@app.delete("/api/skills")
+async def delete_skill(body: dict):
+    skill_id = body.get("skill_id", "")
+    user_id = body.get("user_id", "")
+    if not skill_id:
+        return {"error": "skill_id required"}, 400
+    if not user_id:
+        return {"error": "user_id required"}, 400
+    await skill_service.delete_skill(skill_id, user_id)
+    return {"ok": True}
+
+
+@app.post("/api/skills/publish")
+async def publish_skill(body: dict):
+    skill_id = body.get("skill_id", "")
+    user_id = body.get("user_id", "")
+    if not skill_id:
+        return {"error": "skill_id required"}, 400
+    if not user_id:
+        return {"error": "user_id required"}, 400
+    result = await skill_service.toggle_publish(skill_id, user_id)
+    if result is None:
+        return {"error": "not found or not owned by user"}, 404
+    return {"is_published": result}
+
+
+@app.post("/api/skills/toggle-active")
+async def toggle_active_skill(body: dict):
+    skill_id = body.get("skill_id", "")
+    user_id = body.get("user_id", "")
+    if not skill_id:
+        return {"error": "skill_id required"}, 400
+    if not user_id:
+        return {"error": "user_id required"}, 400
+    is_active = await skill_service.toggle_active(user_id, skill_id)
+    return {"is_active": is_active}
+
+
+@app.post("/api/skills/clone")
+async def clone_skill(body: dict):
+    skill_id = body.get("skill_id", "")
+    user_id = body.get("user_id", "")
+    if not skill_id:
+        return {"error": "skill_id required"}, 400
+    if not user_id:
+        return {"error": "user_id required"}, 400
+    skill = await skill_service.clone_skill(skill_id, user_id)
+    if skill is None:
+        return {"error": "skill not found"}, 404
+    return skill
 
 class _ChatInputIterator:
     """Thread-safe iterator that feeds ChatInput messages to the gRPC stream."""
@@ -340,3 +482,14 @@ async def ws_chat(ws: WebSocket, session_id: str):
         except Exception as e:
             log.warning("close_session on ws disconnect failed for %s: %s", session_id, e)
         ch.close()
+
+
+# ---------- SPA catch-all — must be last ----------
+
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    """Serve index.html for client-side routing paths (chat, settings, etc.)."""
+    # Don't interfere with API / WebSocket paths
+    if full_path.startswith("api/") or full_path.startswith("ws/"):
+        return JSONResponse(status_code=404, content={"error": "not found"})
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))

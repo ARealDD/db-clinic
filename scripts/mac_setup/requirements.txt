@@ -5,3 +5,4 @@ uvicorn
 websockets
 pydantic
 PyYAML
+python-multipart

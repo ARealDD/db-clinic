@@ -76,5 +76,38 @@ scripts/mac_setup/start_dev.sh          # macOS
 |---|---|
 | gRPC server | localhost:50051 |
 | Web UI | http://localhost:8001 |
-| Settings（模型配置） | http://localhost:8001/static/settings.html |
-| Skills API | http://localhost:8001/api/skills |
+
+## 4. 前端 UI (React + TypeScript)
+
+前端位于 `ui/` 目录，基于 Vite + React + TypeScript。构建产物输出到 `python/static/`，由 FastAPI 直接托管。
+
+### 环境准备
+
+需要 Node.js 18+。
+
+### 安装 & 开发
+
+```bash
+cd ui
+npm install
+npm run dev              # 启动 Vite 开发服务器（端口 3000，API 代理到 8001）
+```
+
+开发服务器会自动代理 `/api` 和 `/ws` 请求到 Python 后端。
+
+### 生产构建
+
+```bash
+cd ui
+npm run build            # 构建产物输出到 python/static/
+```
+
+构建后重启 Python 服务器即可使用新的前端页面。页面路由由 React Router 处理：
+
+| 路径 | 页面 |
+|------|------|
+| `/` | 登录页（输入用户名 → 跳转到设置） |
+| `/chat` | 诊断聊天（WebSocket 流式对话） |
+| `/settings` | LLM 模型配置 |
+| `/skills-square` | 技能广场（浏览和克隆技能） |
+| `/my-skills` | 我的仓库（管理个人技能） |

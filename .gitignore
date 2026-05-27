@@ -10,6 +10,7 @@ rust/target/
 python/generated/
 
 # Claude Code local artifacts
+.claude/
 .claude/settings.local.json
 .claude/sessions/
 # Claw Code local artifacts
@@ -21,6 +22,9 @@ status-help.txt
 # Local LLM config (contains API keys)
 tests/llm/config.local.yaml
 
+# SQLite database files
+data/
+
 # Local production config (contains DB credentials)
 config.local.yaml
 
@@ -29,3 +33,7 @@ tests/cases
 
 # Evaluation run output
 tests/results/
+
+# Node.js / frontend
+ui/node_modules/
+ui/dist/
