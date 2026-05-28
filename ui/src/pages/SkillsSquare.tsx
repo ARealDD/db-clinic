@@ -49,7 +49,7 @@ export default function SkillsSquare() {
   const handleClone = async (skill: Skill) => {
     if (!user) return;
     try {
-      await api('/api/skills/clone', { method: 'POST', body: { skill_id: skill.id, user_id: user.id } });
+      await api('/api/skills/clone', { method: 'POST', body: { skill_id: skill.id } });
       setMessage(`"${skill.name}" added to your repository!`);
       setTimeout(() => setMessage(''), 3000);
     } catch (e) {

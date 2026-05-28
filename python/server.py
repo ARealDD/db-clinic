@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from python.db.manager import DatabaseManager
 from python.db.skill_service import SkillService
 from python.db.user_service import UserService
+from python.db.admin_service import AdminService
 
 import metadb
 from models import UserRegister, UserLogin, TokenResponse, UserResponse, LLMConfig
@@ -133,6 +134,7 @@ async def _no_cache_html(request: Request, call_next):
 db = DatabaseManager()
 user_service = UserService(db)
 skill_service = SkillService(db)
+admin_service = AdminService(db, skill_service)
 
 
 @app.on_event("startup")
@@ -149,6 +151,25 @@ async def _startup_init_db():
     await db.initialize()
     count = await db.seed_official_skills()
     log.info("db initialized; seeded %d official skills", count)
+
+    # Bootstrap admin user from environment variables
+    admin_username = os.environ.get("ADMIN_USERNAME", "").strip()
+    admin_password = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if admin_username and admin_password:
+        hashed = auth_mod.hash_password(admin_password)
+        user_id = await metadb.create_user(admin_username, hashed)
+        if user_id is not None:
+            await metadb.set_user_role(user_id, "admin")
+            await user_service.ensure_user(str(user_id), admin_username)
+            log.info("bootstrapped admin user: %s (id=%s)", admin_username, user_id)
+        else:
+            # User already exists — ensure correct password and admin role
+            existing = await metadb.get_user_by_username(admin_username)
+            if existing:
+                await metadb.update_user_password(existing["id"], hashed)
+                if existing.get("role") != "admin":
+                    await metadb.set_user_role(existing["id"], "admin")
+                log.info("updated existing user to admin: %s (id=%s)", admin_username, existing["id"])
 
 
 # ---------- Auth helpers ----------
@@ -202,7 +223,9 @@ async def register(body: UserRegister):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create user",
         )
-    token = auth_mod.create_access_token({"sub": str(user_id)})
+    created = await metadb.get_user_by_id(user_id)
+    role = created["role"] if created else "user"
+    token = auth_mod.create_access_token({"sub": str(user_id), "role": role})
     log.info("registered user %s (id=%s)", body.username, user_id)
     return TokenResponse(access_token=token)
 
@@ -217,7 +240,10 @@ async def login(body: UserLogin):
         user_id = await metadb.create_user(body.username, hashed)
         if user_id is None:
             raise HTTPException(status_code=500, detail="Failed to create user")
-        token = auth_mod.create_access_token({"sub": str(user_id)})
+        # Fetch newly created user to get default role
+        created = await metadb.get_user_by_id(user_id)
+        role = created["role"] if created else "user"
+        token = auth_mod.create_access_token({"sub": str(user_id), "role": role})
         log.info("auto-created + logged in user %s (id=%s)", body.username, user_id)
         return TokenResponse(access_token=token)
 
@@ -229,14 +255,18 @@ async def login(body: UserLogin):
                 detail="Incorrect username or password",
             )
     # If no password provided, skip verification (username-only mode)
-    token = auth_mod.create_access_token({"sub": str(user["id"])})
+    token = auth_mod.create_access_token({"sub": str(user["id"]), "role": user.get("role", "user")})
     log.info("logged in user %s (id=%s)", user["username"], user["id"])
     return TokenResponse(access_token=token)
 
 
 @app.get("/api/auth/me", response_model=UserResponse)
 async def me(current_user: Dict[str, Any] = Depends(get_current_user)):
-    return UserResponse(id=current_user["id"], username=current_user["username"])
+    return UserResponse(
+        id=current_user["id"],
+        username=current_user["username"],
+        role=current_user.get("role", "user"),
+    )
 
 
 # ---------- Per-user LLM config (metadb) ----------
@@ -439,13 +469,26 @@ async def health():
 # ---------- User & Skill REST endpoints ----------
 
 
-@app.post("/api/login")
-async def login(body: dict):
-    username = body.get("username", "").strip()
-    if not username:
-        return {"error": "username required"}, 400
-    user = await user_service.login(username)
+async def get_current_app_user(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+) -> Dict[str, Any]:
+    """JWT auth dependency that also ensures the user exists in the app DB."""
+    user = await get_current_user(credentials)
+    await user_service.ensure_user(str(user["id"]), user["username"])
     return user
+
+
+async def require_admin(
+    current_user: Dict[str, Any] = Depends(get_current_app_user),
+) -> Dict[str, Any]:
+    """FastAPI dependency that ensures the current user has admin role."""
+    if current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+    log.info("admin action by user %s (id=%s)", current_user["username"], current_user["id"])
+    return current_user
 
 
 @app.get("/api/skills/square")
@@ -458,27 +501,37 @@ async def get_skill_square(category: str = "", search: str = ""):
 
 
 @app.get("/api/skills/mine")
-async def get_my_skills(user_id: str = ""):
-    if not user_id:
-        return {"error": "user_id required"}, 400
-    skills = await skill_service.get_user_skills(user_id)
+async def get_my_skills(
+    current_user: Dict[str, Any] = Depends(get_current_app_user),
+):
+    user_id = str(current_user["id"])
+    if current_user.get("role") == "admin":
+        skills = await skill_service.get_all_skills()
+    else:
+        skills = await skill_service.get_user_skills(user_id)
     active_ids = await skill_service.get_active_skill_ids(user_id)
     return {"skills": skills, "active_ids": active_ids}
 
 
 @app.post("/api/skills")
-async def create_skill(body: dict):
-    user_id = body.get("user_id", "")
-    if not user_id:
-        return {"error": "user_id required"}, 400
-    skill = await skill_service.create_skill(user_id, body)
+async def create_skill(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_app_user),
+):
+    user_id = str(current_user["id"])
+    if current_user.get("role") == "admin":
+        skill = await skill_service.create_skill(None, body, is_official=True)
+    else:
+        skill = await skill_service.create_skill(user_id, body)
     return skill
 
 
 @app.post("/api/skills/upload")
-async def upload_skill_file(user_id: str = Form(...), file: UploadFile = File(...)):
-    if not user_id:
-        return {"error": "user_id required"}, 400
+async def upload_skill_file(
+    file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_app_user),
+):
+    user_id = str(current_user["id"])
     content = await file.read()
     import tempfile, pathlib
     suffix = pathlib.Path(file.filename or "skill.md").suffix
@@ -487,72 +540,91 @@ async def upload_skill_file(user_id: str = Form(...), file: UploadFile = File(..
         tmppath = tmp.name
     try:
         data = SkillService.parse_skill_file(tmppath)
-        skill = await skill_service.create_skill(user_id, data)
+        if current_user.get("role") == "admin":
+            skill = await skill_service.create_skill(None, data, is_official=True)
+        else:
+            skill = await skill_service.create_skill(user_id, data)
         return skill
     finally:
         os.unlink(tmppath)
 
 
 @app.put("/api/skills")
-async def update_skill(body: dict):
+async def update_skill(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_app_user),
+):
     skill_id = body.get("skill_id", "")
-    user_id = body.get("user_id", "")
+    user_id = str(current_user["id"])
     if not skill_id:
         return {"error": "skill_id required"}, 400
-    if not user_id:
-        return {"error": "user_id required"}, 400
-    skill = await skill_service.update_skill(skill_id, user_id, body)
+    if current_user.get("role") == "admin":
+        skill = await admin_service.update_any_skill(skill_id, body)
+    else:
+        skill = await skill_service.update_skill(skill_id, user_id, body)
     if skill is None:
-        return {"error": "not found or not owned by user"}, 404
+        msg = "not found" if current_user.get("role") == "admin" else "not found or not owned by user"
+        return {"error": msg}, 404
     return skill
 
 
 @app.delete("/api/skills")
-async def delete_skill(body: dict):
+async def delete_skill(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_app_user),
+):
     skill_id = body.get("skill_id", "")
-    user_id = body.get("user_id", "")
+    user_id = str(current_user["id"])
     if not skill_id:
         return {"error": "skill_id required"}, 400
-    if not user_id:
-        return {"error": "user_id required"}, 400
-    await skill_service.delete_skill(skill_id, user_id)
+    if current_user.get("role") == "admin":
+        await admin_service.delete_any_skill(skill_id)
+    else:
+        await skill_service.delete_skill(skill_id, user_id)
     return {"ok": True}
 
 
 @app.post("/api/skills/publish")
-async def publish_skill(body: dict):
+async def publish_skill(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_app_user),
+):
     skill_id = body.get("skill_id", "")
-    user_id = body.get("user_id", "")
+    user_id = str(current_user["id"])
     if not skill_id:
         return {"error": "skill_id required"}, 400
-    if not user_id:
-        return {"error": "user_id required"}, 400
-    result = await skill_service.toggle_publish(skill_id, user_id)
+    if current_user.get("role") == "admin":
+        result = await admin_service.toggle_any_publish(skill_id)
+    else:
+        result = await skill_service.toggle_publish(skill_id, user_id)
     if result is None:
-        return {"error": "not found or not owned by user"}, 404
+        msg = "not found" if current_user.get("role") == "admin" else "not found or not owned by user"
+        return {"error": msg}, 404
     return {"is_published": result}
 
 
 @app.post("/api/skills/toggle-active")
-async def toggle_active_skill(body: dict):
+async def toggle_active_skill(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_app_user),
+):
     skill_id = body.get("skill_id", "")
-    user_id = body.get("user_id", "")
+    user_id = str(current_user["id"])
     if not skill_id:
         return {"error": "skill_id required"}, 400
-    if not user_id:
-        return {"error": "user_id required"}, 400
     is_active = await skill_service.toggle_active(user_id, skill_id)
     return {"is_active": is_active}
 
 
 @app.post("/api/skills/clone")
-async def clone_skill(body: dict):
+async def clone_skill(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_app_user),
+):
     skill_id = body.get("skill_id", "")
-    user_id = body.get("user_id", "")
+    user_id = str(current_user["id"])
     if not skill_id:
         return {"error": "skill_id required"}, 400
-    if not user_id:
-        return {"error": "user_id required"}, 400
     skill = await skill_service.clone_skill(skill_id, user_id)
     if skill is None:
         return {"error": "skill not found"}, 404
@@ -669,20 +741,28 @@ def _chat_output_to_json(out: agent_pb2.ChatOutput) -> Optional[Dict[str, Any]]:
             usage = {
                 "input_tokens": tc.turn_usage.input_tokens,
                 "output_tokens": tc.turn_usage.output_tokens,
+                "cache_creation_input_tokens": tc.turn_usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": tc.turn_usage.cache_read_input_tokens,
             }
-        return {"type": "turn_complete", "usage": usage, "message_count": len(tc.messages)}
+        return {"type": "turn_complete", "usage": usage, "message_count": len(tc.messages),
+                "stop_reason": tc.stop_reason}
     if field == "error":
         return {
             "type": "error",
             "code": out.error.code,
             "message": out.error.message,
             "recoverable": out.error.recoverable,
+            "failure_class": out.error.failure_class or "",
+            "request_id": out.error.request_id or "",
+            "provider_status": out.error.provider_status,
         }
     if field == "usage_update":
         return {
             "type": "usage_update",
             "input_tokens": out.usage_update.input_tokens,
             "output_tokens": out.usage_update.output_tokens,
+            "cache_creation_input_tokens": out.usage_update.cache_creation_input_tokens,
+            "cache_read_input_tokens": out.usage_update.cache_read_input_tokens,
         }
     if field == "skill_match":
         return {
@@ -738,9 +818,13 @@ async def ws_chat(ws: WebSocket, session_id: str):
             for out in response_stream:
                 if stop_event.is_set():
                     break
+                field = out.WhichOneof("payload")
+                log.debug("gRRC response field=%s", field)
                 payload = _chat_output_to_json(out)
                 if payload:
                     ws_send_queue.put(payload)
+                else:
+                    log.warning("Unhandled gRPC payload field=%s", field)
         except grpc.RpcError as e:
             if not stop_event.is_set():
                 ws_send_queue.put({"type": "error", "message": f"gRPC error: {e}", "recoverable": False})
@@ -851,6 +935,49 @@ async def ws_chat(ws: WebSocket, session_id: str):
         except Exception as e:
             log.warning("close_session on ws disconnect failed for %s: %s", session_id, e)
         ch.close()
+
+
+# ---------- Admin endpoints ----------
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(
+    current_user: Dict[str, Any] = Depends(require_admin),
+):
+    """List all users with skill counts. Admin only."""
+    users = await admin_service.get_all_users_with_counts()
+    return {"users": users}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: int,
+    current_user: Dict[str, Any] = Depends(require_admin),
+):
+    """Delete a user and all their data. Admin only. Cannot delete self."""
+    if user_id == current_user["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete your own account",
+        )
+    await admin_service.delete_user(user_id)
+    return {"ok": True}
+
+
+@app.put("/api/admin/skills/{skill_id}")
+async def admin_update_skill(
+    skill_id: str,
+    body: dict,
+    current_user: Dict[str, Any] = Depends(require_admin),
+):
+    """Update any skill (official or community). Admin only."""
+    skill = await admin_service.update_any_skill(skill_id, body)
+    if skill is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Skill not found",
+        )
+    return skill
 
 
 # ---------- SPA catch-all — must be last ----------

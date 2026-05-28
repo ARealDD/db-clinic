@@ -9,7 +9,7 @@ interface UserContextValue {
   /** Creates a new user (username+password) via /api/auth/register */
   register: (username: string, password: string) => Promise<void>;
   /** Logs in via /api/auth/login — supports username-only or username+password */
-  login: (username: string) => Promise<User>;
+  login: (username: string, password?: string) => Promise<User>;
   logout: () => void;
 }
 
@@ -40,17 +40,19 @@ export function UserProvider({ children }: { children: ReactNode }) {
       body: { username, password },
     });
     setToken(res.access_token);
+    const me = await api<{ id: string; username: string; role?: string }>('/api/auth/me');
+    setUser({ id: String(me.id), username: me.username, role: me.role || 'user' });
   }, []);
 
-  const login = useCallback(async (username: string): Promise<User> => {
+  const login = useCallback(async (username: string, password?: string): Promise<User> => {
     const res = await api<{ access_token: string }>('/api/auth/login', {
       method: 'POST',
-      body: { username, password: '' },
+      body: { username, password: password || '' },
     });
     setToken(res.access_token);
     // Decode the user from the JWT
-    const me = await api<{ id: string; username: string }>('/api/auth/me');
-    const u: User = { id: String(me.id), username: me.username };
+    const me = await api<{ id: string; username: string; role?: string }>('/api/auth/me');
+    const u: User = { id: String(me.id), username: me.username, role: me.role || 'user' };
     setUser(u);
     return u;
   }, []);

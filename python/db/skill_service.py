@@ -22,9 +22,13 @@ class SkillService:
     # ------------------------------------------------------------------
 
     async def create_skill(
-        self, user_id: str, data: dict[str, Any]
+        self, user_id: str | None, data: dict[str, Any], is_official: bool = False,
     ) -> dict[str, Any]:
-        """Create a new personal skill from form data or parsed file."""
+        """Create a new personal skill from form data or parsed file.
+
+        When *is_official* is True the skill is created as an official skill
+        (owner_id = NULL, is_official = 1). This is an admin-only operation.
+        """
         skill_id = data.get("id", str(uuid.uuid4()))
         name = data.get("name", "Untitled Skill")
         description = data.get("description", "")
@@ -35,26 +39,34 @@ class SkillService:
         for key in ("id", "name", "description", "content"):
             meta.pop(key, None)
 
-        await self._db.execute_write(
-            """INSERT INTO skills
-               (id, name, description, content, metadata, owner_id, is_published)
-               VALUES (?, ?, ?, ?, ?, ?, 0)""",
-            (
-                skill_id,
-                name,
-                description,
-                content,
-                json.dumps(meta, ensure_ascii=False),
-                user_id,
-            ),
-        )
-        return await self._get_skill(skill_id)
+        if is_official:
+            await self._db.execute_write(
+                """INSERT INTO skills
+                   (id, name, description, content, metadata, owner_id, is_official, is_published)
+                   VALUES (?, ?, ?, ?, ?, NULL, 1, 1)""",
+                (skill_id, name, description, content, json.dumps(meta, ensure_ascii=False)),
+            )
+        else:
+            await self._db.execute_write(
+                """INSERT INTO skills
+                   (id, name, description, content, metadata, owner_id, is_published)
+                   VALUES (?, ?, ?, ?, ?, ?, 0)""",
+                (
+                    skill_id,
+                    name,
+                    description,
+                    content,
+                    json.dumps(meta, ensure_ascii=False),
+                    user_id,
+                ),
+            )
+        return await self.get_skill(skill_id)
 
     async def update_skill(
         self, skill_id: str, user_id: str, data: dict[str, Any]
     ) -> dict[str, Any] | None:
         """Update a personal skill (only if owned by user_id)."""
-        skill = await self._get_skill(skill_id)
+        skill = await self.get_skill(skill_id)
         if not skill or skill.get("owner_id") != user_id:
             return None
 
@@ -84,7 +96,7 @@ class SkillService:
                 user_id,
             ),
         )
-        return await self._get_skill(skill_id)
+        return await self.get_skill(skill_id)
 
     async def delete_skill(self, skill_id: str, user_id: str) -> bool:
         """Delete a personal skill (only if owned by user_id).
@@ -129,13 +141,23 @@ class SkillService:
         )
         return [dict(r) for r in rows]
 
+    async def get_all_skills(self) -> list[dict[str, Any]]:
+        """Get ALL skills (admin only). No owner filter."""
+        rows = await self._db.execute(
+            """SELECT s.*, src.is_official AS source_is_official
+               FROM skills s
+               LEFT JOIN skills src ON s.source_skill_id = src.id
+               ORDER BY s.is_official DESC, s.created_at DESC""",
+        )
+        return [dict(r) for r in rows]
+
     async def get_square_skills(
         self, category: str | None = None, search: str | None = None
     ) -> dict[str, list[dict[str, Any]]]:
         """Get skills for the Skill Square, separated by official/published."""
-        # Official skills
+        # Official skills (respect is_published so admin can hide/show)
         official = await self._db.execute(
-            "SELECT * FROM skills WHERE is_official = 1 ORDER BY name"
+            "SELECT * FROM skills WHERE is_official = 1 AND is_published = 1 ORDER BY name"
         )
         # Published personal skills
         published = await self._db.execute(
@@ -166,7 +188,7 @@ class SkillService:
 
         return result
 
-    async def _get_skill(self, skill_id: str) -> dict[str, Any] | None:
+    async def get_skill(self, skill_id: str) -> dict[str, Any] | None:
         rows = await self._db.execute(
             "SELECT * FROM skills WHERE id = ?", (skill_id,)
         )
@@ -180,7 +202,7 @@ class SkillService:
         self, skill_id: str, user_id: str
     ) -> dict[str, Any] | None:
         """Copy a skill from the square into user's personal repository."""
-        original = await self._get_skill(skill_id)
+        original = await self.get_skill(skill_id)
         if not original:
             return None
         # Don't clone if user already has this skill
@@ -189,7 +211,7 @@ class SkillService:
             (skill_id, user_id),
         )
         if existing:
-            return await self._get_skill(existing[0]["id"])
+            return await self.get_skill(existing[0]["id"])
 
         new_id = str(uuid.uuid4())
         meta = json.loads(original.get("metadata", "{}"))
@@ -208,7 +230,7 @@ class SkillService:
                 skill_id,
             ),
         )
-        return await self._get_skill(new_id)
+        return await self.get_skill(new_id)
 
     async def toggle_publish(self, skill_id: str, user_id: str) -> bool | None:
         """Toggle publish status. Only for skills owned by the user.
@@ -218,7 +240,7 @@ class SkillService:
         If another personal skill of the same name is already published,
         it is automatically unpublished first (replaced).
         """
-        skill = await self._get_skill(skill_id)
+        skill = await self.get_skill(skill_id)
         if not skill or skill.get("owner_id") != user_id:
             return None
         if not skill["is_published"]:

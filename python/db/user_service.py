@@ -14,6 +14,43 @@ class UserService:
     def __init__(self, db: DatabaseManager) -> None:
         self._db = db
 
+    async def ensure_user(self, user_id: str, username: str) -> None:
+        """Ensure a user exists in the app DB (create if not).
+
+        If the username already exists with a different ID (from the old
+        UUID-based flow), migrate the existing row and all FK references
+        to the new metadb-derived ID.
+        """
+        # Already exists with matching ID — nothing to do
+        rows = await self._db.execute(
+            "SELECT id FROM users WHERE id = ?", (user_id,)
+        )
+        if rows:
+            return
+
+        # Exists with same username but different ID (old UUID flow)
+        rows = await self._db.execute(
+            "SELECT id FROM users WHERE username = ?", (username.strip(),)
+        )
+        if rows:
+            old_id = rows[0]["id"]
+            await self._db.execute_write(
+                "UPDATE skills SET owner_id = ? WHERE owner_id = ?", (user_id, old_id)
+            )
+            await self._db.execute_write(
+                "UPDATE user_active_skills SET user_id = ? WHERE user_id = ?", (user_id, old_id)
+            )
+            await self._db.execute_write(
+                "UPDATE users SET id = ? WHERE id = ?", (user_id, old_id)
+            )
+            return
+
+        # New user — insert
+        await self._db.execute_write(
+            "INSERT INTO users (id, username) VALUES (?, ?)",
+            (user_id, username.strip()),
+        )
+
     async def login(self, username: str) -> dict[str, Any]:
         """Get or create a user by username. Returns user row as dict."""
         rows = await self._db.execute(

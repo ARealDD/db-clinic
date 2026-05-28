@@ -1,4 +1,4 @@
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
 import { useUser } from '../context/UserContext';
 
 interface SidebarProps {
@@ -6,7 +6,8 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ onShowLogin }: SidebarProps) {
-  const { user } = useUser();
+  const { user, logout } = useUser();
+  const navigate = useNavigate();
 
   return (
     <>
@@ -50,15 +51,29 @@ export default function Sidebar({ onShowLogin }: SidebarProps) {
           <NavLink className="nav-item" to="/my-skills">
             <span className="nav-icon">🔧</span> 我的仓库
           </NavLink>
+          {user?.role === 'admin' && (
+            <NavLink className="nav-item" to="/admin">
+              <span className="nav-icon">🛡️</span> 管理
+            </NavLink>
+          )}
         </nav>
         <div className="sidebar-spacer" />
         <div className="sidebar-footer">
           <NavLink className="nav-item" to="/settings">
             <span className="nav-icon">⚙️</span> 设置
           </NavLink>
-          <div className="nav-item nav-user" onClick={onShowLogin}>
+          <div className="nav-item nav-user" onClick={onShowLogin} style={{ cursor: 'pointer' }}>
             <span className="nav-icon">👤</span>
-            <span>{user ? user.username : '未登录'}</span>
+            <span style={{ flex: 1 }}>{user ? user.username : '未登录'}</span>
+            {user && (
+              <span
+                onClick={(e) => { e.stopPropagation(); logout(); navigate('/'); }}
+                style={{ fontSize: 12, color: 'var(--danger)', cursor: 'pointer', padding: '0 4px' }}
+                title="退出登录"
+              >
+                退出
+              </span>
+            )}
           </div>
         </div>
       </aside>

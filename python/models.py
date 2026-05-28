@@ -14,7 +14,7 @@ class UserRegister(BaseModel):
 
 class UserLogin(BaseModel):
     username: str
-    password: str
+    password: str = ""
 
 
 class TokenResponse(BaseModel):
@@ -25,6 +25,7 @@ class TokenResponse(BaseModel):
 class UserResponse(BaseModel):
     id: int
     username: str
+    role: str = "user"
 
 
 class LLMConfig(BaseModel):

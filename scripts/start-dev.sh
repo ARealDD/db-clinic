@@ -24,6 +24,7 @@ GRPC_ADDR="0.0.0.0:50051"
 FASTAPI_PORT=8001
 GRPC_PID=""
 FASTAPI_PID=""
+VITE_PID=""
 
 # Parse flags
 while [[ $# -gt 0 ]]; do
@@ -43,6 +44,7 @@ done
 cleanup() {
     echo ""
     echo "Shutting down..."
+    [ -n "$VITE_PID" ]    && kill "$VITE_PID" 2>/dev/null    && wait "$VITE_PID" 2>/dev/null    || true
     [ -n "$FASTAPI_PID" ] && kill "$FASTAPI_PID" 2>/dev/null && wait "$FASTAPI_PID" 2>/dev/null || true
     [ -n "$GRPC_PID" ]    && kill "$GRPC_PID" 2>/dev/null    && wait "$GRPC_PID" 2>/dev/null    || true
     echo "Done."
@@ -56,7 +58,17 @@ if ! $SKIP_BUILD; then
   echo ""
 fi
 
-# ---- Step 2: Start Rust gRPC server ----
+# ---- Step 2: Install npm dependencies & start Vite dev server ----
+echo "=== Starting Vite dev server (port 3000) ==="
+cd "$REPO_ROOT/ui"
+if [ ! -d node_modules ]; then
+  npm install --silent
+fi
+npm run dev &
+VITE_PID=$!
+cd "$REPO_ROOT"
+
+# ---- Step 3: Start Rust gRPC server ----
 echo "=== Starting Rust gRPC server ==="
 cd "$REPO_ROOT/rust"
 cargo run -p agent-grpc-server -- --addr "$GRPC_ADDR" --skills-dir "$REPO_ROOT/skills" --config "$REPO_ROOT/config.toml" $MOCK_FLAG &
@@ -84,7 +96,7 @@ for i in $(seq 1 15); do
 done
 echo ""
 
-# ---- Step 3: Install Python dependencies ----
+# ---- Step 4: Install Python dependencies ----
 echo "=== Installing Python dependencies ==="
 pip3 install --quiet aiosqlite python-jose bcrypt cryptography 2>/dev/null \
   || pip install --quiet aiosqlite python-jose bcrypt cryptography 2>/dev/null \
@@ -92,10 +104,11 @@ pip3 install --quiet aiosqlite python-jose bcrypt cryptography 2>/dev/null \
   || python -m pip install --quiet aiosqlite python-jose bcrypt cryptography 2>/dev/null \
   || { echo "WARNING: Could not install Python deps via pip; they may already be present or need manual install."; }
 
-# ---- Step 4: Start Python FastAPI gateway ----
+# ---- Step 5: Start Python FastAPI gateway ----
 echo "=== Starting FastAPI gateway ==="
 cd "$REPO_ROOT/python"
 GRPC_ADDR="localhost:${GRPC_ADDR##*:}" \
+  ADMIN_USERNAME=admin ADMIN_PASSWORD=Gauss_234 \
   python -m uvicorn server:app \
     --host 0.0.0.0 \
     --port "$FASTAPI_PORT" \
@@ -106,11 +119,11 @@ FASTAPI_PID=$!
 sleep 2
 echo ""
 echo "============================================"
-echo "  gRPC server:   $GRPC_ADDR"
+echo "  gRPC server:    $GRPC_ADDR"
 [ -n "$MOCK_FLAG" ] && echo "                  (mock mode)"
-echo "  Web UI:        http://localhost:$FASTAPI_PORT"
-echo "  Settings:      http://localhost:$FASTAPI_PORT/static/settings.html"
-echo "  Health:        http://localhost:$FASTAPI_PORT/api/health"
+echo "  Web UI (dev):   http://localhost:3000"
+echo "  Web UI (prod):  http://localhost:$FASTAPI_PORT"
+echo "  Health:         http://localhost:$FASTAPI_PORT/api/health"
 echo "============================================"
 echo ""
 echo "Press Ctrl+C to stop all services."

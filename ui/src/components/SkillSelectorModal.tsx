@@ -18,7 +18,7 @@ export default function SkillSelectorModal({ open, onClose }: SkillSelectorModal
   useEffect(() => {
     if (!open || !user) return;
     setLoading(true);
-    api<MySkillsData>(`/api/skills/mine?user_id=${encodeURIComponent(user.id)}`)
+    api<MySkillsData>('/api/skills/mine')
       .then((data) => {
         setSkills(data.skills);
         setActiveIds(new Set(data.active_ids));
@@ -49,7 +49,7 @@ export default function SkillSelectorModal({ open, onClose }: SkillSelectorModal
         const nowActive = activeIds.has(skill.id);
         if (wasActive !== nowActive) {
           await api('/api/skills/toggle-active', {
-            method: 'POST', body: { skill_id: skill.id, user_id: user.id },
+            method: 'POST', body: { skill_id: skill.id },
           });
         }
       }

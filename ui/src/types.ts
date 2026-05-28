@@ -2,7 +2,20 @@
 export interface User {
   id: string;
   username: string;
+  role?: string;
   created_at?: string;
+}
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  role: string;
+  created_at: number;
+  skill_count: number;
+}
+
+export interface AdminUsersResponse {
+  users: AdminUser[];
 }
 
 // ---------- LLM Config ----------

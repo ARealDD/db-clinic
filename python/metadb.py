@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     username  TEXT    NOT NULL UNIQUE,
     hashed_pw TEXT    NOT NULL,
+    role      TEXT    NOT NULL DEFAULT 'user',
     created_at REAL   NOT NULL DEFAULT (strftime('%s','now'))
 );
 """
@@ -50,6 +51,11 @@ async def init_db() -> None:
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
     await db.executescript(_CREATE_USERS_TABLE + _CREATE_USER_CONFIGS_TABLE)
+    # Migration: add role column for databases created before admin feature
+    try:
+        await db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+    except aiosqlite.OperationalError:
+        pass  # column already exists
     await db.commit()
     await db.close()
     log.info("metadatabase initialised at %s", DB_PATH)
@@ -85,33 +91,33 @@ async def create_user(username: str, hashed_pw: str) -> Optional[int]:
 
 
 async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
-    """Look up a user by username. Returns dict with id, username, hashed_pw or None."""
+    """Look up a user by username. Returns dict with id, username, hashed_pw, role or None."""
     db = await _get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, hashed_pw FROM users WHERE username = ?",
+            "SELECT id, username, hashed_pw, role FROM users WHERE username = ?",
             (username,),
         )
         row = await cursor.fetchone()
         if row is None:
             return None
-        return {"id": row["id"], "username": row["username"], "hashed_pw": row["hashed_pw"]}
+        return {"id": row["id"], "username": row["username"], "hashed_pw": row["hashed_pw"], "role": row["role"]}
     finally:
         await db.close()
 
 
 async def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
-    """Look up a user by id. Returns dict with id, username, hashed_pw or None."""
+    """Look up a user by id. Returns dict with id, username, hashed_pw, role or None."""
     db = await _get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, hashed_pw FROM users WHERE id = ?",
+            "SELECT id, username, hashed_pw, role FROM users WHERE id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
         if row is None:
             return None
-        return {"id": row["id"], "username": row["username"], "hashed_pw": row["hashed_pw"]}
+        return {"id": row["id"], "username": row["username"], "hashed_pw": row["hashed_pw"], "role": row["role"]}
     finally:
         await db.close()
 
@@ -170,5 +176,54 @@ async def get_all_user_configs(user_id: int) -> Dict[str, Any]:
             except (json.JSONDecodeError, TypeError):
                 result[row["key"]] = row["value"]
         return result
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Admin operations
+# ---------------------------------------------------------------------------
+
+
+async def get_all_users() -> list[Dict[str, Any]]:
+    """Return all users (id, username, role, created_at) — no hashed_pw."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, username, role, created_at FROM users ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def set_user_role(user_id: int, role: str) -> None:
+    """Set the role for a user (e.g. promote to admin)."""
+    db = await _get_db()
+    try:
+        await db.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def update_user_password(user_id: int, hashed_pw: str) -> None:
+    """Update the password hash for a user."""
+    db = await _get_db()
+    try:
+        await db.execute("UPDATE users SET hashed_pw = ? WHERE id = ?", (hashed_pw, user_id))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def delete_user_cascade(user_id: int) -> bool:
+    """Delete a user from metadb. Cascades to user_configs via FK."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        await db.commit()
+        return cursor.rowcount > 0
     finally:
         await db.close()

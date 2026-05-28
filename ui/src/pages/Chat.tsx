@@ -194,14 +194,9 @@ export default function Chat() {
 
   // Load skill count
   useEffect(() => {
-    const userRaw = localStorage.getItem('db_clinic_user');
-    if (!userRaw) return;
-    try {
-      const user = JSON.parse(userRaw);
-      api<{ skills: unknown[]; active_ids: string[] }>(`/api/skills/mine?user_id=${encodeURIComponent(user.id)}`)
-        .then((data) => setSkillCountLocal(data.active_ids.length))
-        .catch(() => {});
-    } catch { /* ignore */ }
+    api<{ skills: unknown[]; active_ids: string[] }>('/api/skills/mine')
+      .then((data) => setSkillCountLocal(data.active_ids.length))
+      .catch(() => {});
   }, []);
 
   // Create session and connect WS when ready

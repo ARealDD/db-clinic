@@ -348,14 +348,20 @@ class TurnComplete(_message.Message):
     def __init__(self, messages: _Optional[_Iterable[_Union[ConversationMessage, _Mapping]]] = ..., turn_usage: _Optional[_Union[TokenUsage, _Mapping]] = ..., stop_reason: _Optional[_Union[TurnStopReason, str]] = ...) -> None: ...
 
 class ErrorEvent(_message.Message):
-    __slots__ = ("code", "message", "recoverable")
+    __slots__ = ("code", "message", "recoverable", "failure_class", "request_id", "provider_status")
     CODE_FIELD_NUMBER: _ClassVar[int]
     MESSAGE_FIELD_NUMBER: _ClassVar[int]
     RECOVERABLE_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_CLASS_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    PROVIDER_STATUS_FIELD_NUMBER: _ClassVar[int]
     code: ErrorCode
     message: str
     recoverable: bool
-    def __init__(self, code: _Optional[_Union[ErrorCode, str]] = ..., message: _Optional[str] = ..., recoverable: bool = ...) -> None: ...
+    failure_class: str
+    request_id: str
+    provider_status: int
+    def __init__(self, code: _Optional[_Union[ErrorCode, str]] = ..., message: _Optional[str] = ..., recoverable: bool = ..., failure_class: _Optional[str] = ..., request_id: _Optional[str] = ..., provider_status: _Optional[int] = ...) -> None: ...
 
 class TokenUsage(_message.Message):
     __slots__ = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")

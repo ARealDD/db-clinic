@@ -150,6 +150,11 @@ class DatabaseManager:
 
         def _seed() -> int:
             count = 0
+            # Migration: ensure existing official skills are published
+            self._conn.execute(
+                "UPDATE skills SET is_published = 1 WHERE is_official = 1 AND is_published = 0"
+            )
+            self._conn.commit()
             for subdir in ["case", "knowledge"]:
                 search_path = skills_root / subdir
                 if not search_path.exists():
@@ -167,8 +172,8 @@ class DatabaseManager:
                         continue
                     self._conn.execute(
                         """INSERT INTO skills
-                           (id, name, description, content, metadata, is_official)
-                           VALUES (?, ?, ?, ?, ?, 1)""",
+                           (id, name, description, content, metadata, is_official, is_published)
+                           VALUES (?, ?, ?, ?, ?, 1, 1)""",
                         (
                             parsed["id"],
                             parsed["name"],

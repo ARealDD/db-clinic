@@ -28,7 +28,7 @@ export default function MySkills() {
     if (!user) return;
     setLoading(true);
     try {
-      const data = await api<MySkillsData>(`/api/skills/mine?user_id=${encodeURIComponent(user.id)}`);
+      const data = await api<MySkillsData>('/api/skills/mine');
       setSkills(data.skills);
       setActiveIds(data.active_ids);
     } catch (e) {
@@ -42,14 +42,19 @@ export default function MySkills() {
     loadSkills();
   }, [loadSkills]);
 
-  const ownSkills = skills.filter((s) => !s.source_skill_id || s.source_is_official === 0);
-  const copiedSkills = skills.filter((s) => !!s.source_skill_id && s.source_is_official === 1);
+  const isAdmin = user?.role === 'admin';
+  const ownSkills = isAdmin
+    ? skills.filter((s) => s.is_official === 0)
+    : skills.filter((s) => !s.source_skill_id || s.source_is_official === 0);
+  const officialSkills = isAdmin
+    ? skills.filter((s) => s.is_official === 1)
+    : skills.filter((s) => !!s.source_skill_id && s.source_is_official === 1);
 
   const handleToggleActive = async (skill: Skill) => {
     if (!user) return;
     try {
       const data = await api<{ is_active: boolean }>('/api/skills/toggle-active', {
-        method: 'POST', body: { skill_id: skill.id, user_id: user.id },
+        method: 'POST', body: { skill_id: skill.id },
       });
       if (data.is_active) {
         setActiveIds((prev) => [...prev, skill.id]);
@@ -65,7 +70,7 @@ export default function MySkills() {
     if (!user) return;
     try {
       const data = await api<{ is_published: boolean }>('/api/skills/publish', {
-        method: 'POST', body: { skill_id: skill.id, user_id: user.id },
+        method: 'POST', body: { skill_id: skill.id },
       });
       setSkills((prev) => prev.map((s) => s.id === skill.id ? { ...s, is_published: data.is_published ? 1 : 0 } : s));
     } catch (e) {
@@ -76,7 +81,7 @@ export default function MySkills() {
   const handleDelete = async (skill: Skill) => {
     if (!user || !confirm(`确认删除技能 "${skill.name}"？`)) return;
     try {
-      await api('/api/skills', { method: 'DELETE', body: { skill_id: skill.id, user_id: user.id } });
+      await api('/api/skills', { method: 'DELETE', body: { skill_id: skill.id } });
       setSkills((prev) => prev.filter((s) => s.id !== skill.id));
       setMessage(`"${skill.name}" deleted.`);
       setTimeout(() => setMessage(''), 3000);
@@ -115,9 +120,9 @@ export default function MySkills() {
     <div style={CONTAINER}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <div>
-          <h1 style={{ fontSize: 24, fontWeight: 700 }}>我的仓库</h1>
+          <h1 style={{ fontSize: 24, fontWeight: 700 }}>{isAdmin ? '技能管理' : '我的仓库'}</h1>
           <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 4 }}>
-            管理你的个人技能库和克隆的技能
+            {isAdmin ? '管理所有技能（官方和社区）' : '管理你的个人技能库和克隆的技能'}
           </p>
         </div>
         <button onClick={handleNew} style={{
@@ -144,10 +149,10 @@ export default function MySkills() {
       ) : (
         <>
           <div style={{ marginBottom: 32 }}>
-            <h2 style={SECTION_TITLE}>我的技能 ({ownSkills.length})</h2>
+            <h2 style={SECTION_TITLE}>{isAdmin ? '社区技能' : '我的技能'} ({ownSkills.length})</h2>
             {ownSkills.length === 0 ? (
               <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
-                还没有创建技能，点击"新建技能"开始。
+                {isAdmin ? '暂无社区发布的技能' : '还没有创建技能，点击"新建技能"开始。'}
               </p>
             ) : (
               <div style={GRID}>
@@ -157,6 +162,7 @@ export default function MySkills() {
                     skill={s}
                     variant="repo"
                     isActive={activeIds.includes(s.id)}
+                    isAdmin={isAdmin}
                     onToggleActive={handleToggleActive}
                     onEdit={handleEdit}
                     onDelete={handleDelete}
@@ -168,22 +174,24 @@ export default function MySkills() {
           </div>
 
           <div>
-            <h2 style={SECTION_TITLE}>已复制的官方技能 ({copiedSkills.length})</h2>
-            {copiedSkills.length === 0 ? (
+            <h2 style={SECTION_TITLE}>{isAdmin ? '官方技能' : '已复制的官方技能'} ({officialSkills.length})</h2>
+            {officialSkills.length === 0 ? (
               <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
-                前往技能广场浏览和克隆官方技能。
+                {isAdmin ? '暂无官方技能' : '前往技能广场浏览和克隆官方技能。'}
               </p>
             ) : (
               <div style={GRID}>
-                {copiedSkills.map((s) => (
+                {officialSkills.map((s) => (
                   <SkillCard
                     key={s.id}
                     skill={s}
                     variant="repo"
                     isActive={activeIds.includes(s.id)}
+                    isAdmin={isAdmin}
                     onToggleActive={handleToggleActive}
                     onEdit={handleEdit}
                     onDelete={handleDelete}
+                    onPublish={handlePublish}
                   />
                 ))}
               </div>

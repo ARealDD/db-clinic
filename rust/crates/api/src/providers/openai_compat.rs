@@ -1106,7 +1106,7 @@ pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
 /// Remove `role:"tool"` messages from `messages` that have no valid paired
 /// `role:"assistant"` message with a matching `tool_calls[].id` immediately
 /// preceding them. Public for benchmarking purposes.
-pub fn sanitize_tool_message_pairing(messages: Vec<Value>) -> Vec<Value> {
+pub fn sanitize_tool_message_pairing(mut messages: Vec<Value>) -> Vec<Value> {
     // Collect indices of tool messages that are orphaned.
     let mut drop_indices = std::collections::HashSet::new();
     for (i, msg) in messages.iter().enumerate() {
@@ -1151,15 +1151,77 @@ pub fn sanitize_tool_message_pairing(messages: Vec<Value>) -> Vec<Value> {
             drop_indices.insert(i);
         }
     }
-    if drop_indices.is_empty() {
-        return messages;
+    if !drop_indices.is_empty() {
+        messages = messages
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !drop_indices.contains(i))
+            .map(|(_, m)| m)
+            .collect();
     }
+    // Second pass: strip `tool_calls` entries from assistant messages that
+    // have no matching `role:"tool"` message with a corresponding
+    // `tool_call_id` anywhere after them.  A dropped tool message (above)
+    // or a mid-turn failure leaves an assistant with orphaned tool_calls
+    // that OpenAI-compatible backends reject with 400.
+    strip_orphaned_tool_calls(&mut messages);
     messages
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| !drop_indices.contains(i))
-        .map(|(_, m)| m)
-        .collect()
+}
+
+/// Remove `tool_calls` entries from every assistant message that lack a
+/// matching `role:"tool"` / `tool_call_id` later in the conversation.
+/// Runs in-place on the already-sanitised message list.
+fn strip_orphaned_tool_calls(messages: &mut Vec<Value>) {
+    for i in 0..messages.len() {
+        let role = messages[i]
+            .get("role")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        match role {
+            Some(ref r) if r == "assistant" => {}
+            _ => continue,
+        }
+
+        // Clone tool_calls out to avoid borrowing messages[i] when we
+        // later need to mutate it.
+        let Some(tool_calls) = messages[i]
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .map(|tc| tc.clone())
+        else {
+            continue;
+        };
+        if tool_calls.is_empty() {
+            continue;
+        }
+
+        let ids_after: std::collections::HashSet<&str> = messages[i + 1..]
+            .iter()
+            .filter(|m| m.get("role").and_then(|v| v.as_str()) == Some("tool"))
+            .filter_map(|m| m.get("tool_call_id").and_then(|v| v.as_str()))
+            .collect();
+
+        let kept: Vec<Value> = tool_calls
+            .iter()
+            .filter(|tc| {
+                tc.get("id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| ids_after.contains(id))
+            })
+            .cloned()
+            .collect();
+
+        if kept.len() == tool_calls.len() {
+            continue; // nothing orphaned
+        }
+        if let Some(obj) = messages[i].as_object_mut() {
+            if kept.is_empty() {
+                obj.remove("tool_calls");
+            } else {
+                obj["tool_calls"] = Value::Array(kept);
+            }
+        }
+    }
 }
 
 /// Flattens tool result content blocks into a single string.

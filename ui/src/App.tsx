@@ -8,6 +8,7 @@ const Chat = lazy(() => import('./pages/Chat'));
 const Settings = lazy(() => import('./pages/Settings'));
 const SkillsSquare = lazy(() => import('./pages/SkillsSquare'));
 const MySkills = lazy(() => import('./pages/MySkills'));
+const AdminPage = lazy(() => import('./pages/AdminPage'));
 
 function Loading() {
   return <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-secondary)' }}>加载中...</div>;
@@ -29,6 +30,7 @@ export default function App() {
             <Route path="/settings" element={<Settings />} />
             <Route path="/skills-square" element={<SkillsSquare />} />
             <Route path="/my-skills" element={<MySkills />} />
+            <Route path="/admin" element={<AdminPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>

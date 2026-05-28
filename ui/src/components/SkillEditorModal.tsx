@@ -128,17 +128,16 @@ export default function SkillEditorModal({ open, onClose, editSkill, onSaved }: 
       if (editSkill) {
         await api('/api/skills', {
           method: 'PUT',
-          body: { skill_id: editSkill.id, user_id: user.id, ...buildFormData() },
+          body: { skill_id: editSkill.id, ...buildFormData() },
         });
       } else if (tab === 'upload' && uploadFile) {
         const formData = new FormData();
-        formData.append('user_id', user.id);
         formData.append('file', uploadFile);
         await api('/api/skills/upload', { method: 'POST', body: formData });
       } else {
         await api('/api/skills', {
           method: 'POST',
-          body: { user_id: user.id, ...buildFormData() },
+          body: { ...buildFormData() },
         });
       }
       onSaved();

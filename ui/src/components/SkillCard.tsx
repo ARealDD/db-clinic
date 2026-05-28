@@ -8,6 +8,8 @@ interface SkillCardProps {
   isActive?: boolean;
   /** Whether user is logged in (square variant only) */
   loggedIn?: boolean;
+  /** Whether current user is admin (shows edit/delete on all skills) */
+  isAdmin?: boolean;
   onClick?: (skill: Skill) => void;
   onClone?: (skill: Skill) => void;
   onToggleActive?: (skill: Skill) => void;
@@ -36,7 +38,7 @@ const btnGroup: React.CSSProperties = {
   display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 'auto', paddingTop: 8,
 };
 
-export default function SkillCard({ skill, variant, isActive, loggedIn, onClick, onClone, onToggleActive, onEdit, onDelete, onPublish }: SkillCardProps) {
+export default function SkillCard({ skill, variant, isActive, loggedIn, isAdmin, onClick, onClone, onToggleActive, onEdit, onDelete, onPublish }: SkillCardProps) {
   const meta = parseMeta(skill);
   const category = (meta.category as string) || '';
   const skillType = (meta.skill_type as string) || '';
@@ -100,7 +102,7 @@ export default function SkillCard({ skill, variant, isActive, loggedIn, onClick,
             }}>
             {isActive ? '已激活' : '未激活'}
           </button>
-          {!isOfficial && (
+          {(!isOfficial || isAdmin) && (
             <>
               <button onClick={() => onEdit?.(skill)}
                 style={{
@@ -109,7 +111,7 @@ export default function SkillCard({ skill, variant, isActive, loggedIn, onClick,
                 }}>
                 编辑
               </button>
-              {!isCopied && (
+              {(!isCopied || isAdmin) && (
                 <button onClick={() => onPublish?.(skill)}
                   style={{
                     padding: '6px 14px', border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer',
