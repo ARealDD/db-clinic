@@ -22,6 +22,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
 import db
+import db_skills
 from models import UserRegister, UserLogin, TokenResponse, UserResponse, LLMConfig
 from tool_usage_guidance import TOOL_USAGE_GUIDANCE
 
@@ -231,6 +232,7 @@ async def register(body: UserRegister):
     created = await db.get_user_by_id(user_id)
     role = created["role"] if created else "user"
     token = auth_mod.create_access_token({"sub": str(user_id), "role": role})
+    db_skills.ensure_user_exists(str(user_id), body.username)
     log.info("registered user %s (id=%s)", body.username, user_id)
     return TokenResponse(access_token=token)
 
@@ -244,6 +246,7 @@ async def login(body: UserLogin):
             detail="Incorrect username or password",
         )
     token = auth_mod.create_access_token({"sub": str(user["id"]), "role": user.get("role", "user")})
+    db_skills.ensure_user_exists(str(user["id"]), user["username"])
     log.info("logged in user %s (id=%s)", user["username"], user["id"])
     return TokenResponse(access_token=token)
 
@@ -722,6 +725,128 @@ async def preview_skills(
         }
     except grpc.RpcError as e:
         return {"matches": [], "error": str(e)}
+
+
+# ---------- Skills management ----------
+
+@app.get("/api/skills/mine")
+async def skills_mine(current_user: Dict[str, Any] = Depends(get_current_user)):
+    uid = str(current_user["id"])
+    is_admin = current_user.get("role") == "admin"
+    skills = db_skills.get_user_skills(uid, is_admin=is_admin)
+    active_ids = db_skills.get_user_active_ids(uid)
+    return {"skills": skills, "active_ids": active_ids}
+
+
+@app.get("/api/skills/square")
+async def skills_square(search: str = "", category: str = ""):
+    return db_skills.get_square_skills(search, category)
+
+
+@app.post("/api/skills")
+async def skills_create(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    skill_id = db_skills.create_skill(
+        user_id=str(current_user["id"]),
+        name=body.get("name", ""),
+        content=body.get("content", ""),
+        description=body.get("description", ""),
+        skill_type=body.get("skill_type", "case"),
+        category=body.get("category", ""),
+        keywords=body.get("keywords"),
+        triggers=body.get("triggers"),
+        symptoms=body.get("symptoms"),
+        tags=body.get("tags"),
+    )
+    return {"id": skill_id}
+
+
+@app.put("/api/skills")
+async def skills_update(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    skill_id = body.get("skill_id", "")
+    if not skill_id:
+        raise HTTPException(status_code=400, detail="skill_id required")
+    ok = db_skills.update_skill(skill_id, str(current_user["id"]), body)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return {"ok": True}
+
+
+@app.delete("/api/skills")
+async def skills_delete(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    skill_id = body.get("skill_id", "")
+    if not skill_id:
+        raise HTTPException(status_code=400, detail="skill_id required")
+    db_skills.delete_skill(skill_id)
+    return {"ok": True}
+
+
+@app.post("/api/skills/clone")
+async def skills_clone(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    skill_id = body.get("skill_id", "")
+    if not skill_id:
+        raise HTTPException(status_code=400, detail="skill_id required")
+    new_id = db_skills.clone_skill(skill_id, str(current_user["id"]))
+    if new_id is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return {"id": new_id}
+
+
+@app.post("/api/skills/toggle-active")
+async def skills_toggle_active(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    skill_id = body.get("skill_id", "")
+    if not skill_id:
+        raise HTTPException(status_code=400, detail="skill_id required")
+    is_active = db_skills.toggle_active(skill_id, str(current_user["id"]))
+    return {"is_active": is_active}
+
+
+@app.post("/api/skills/publish")
+async def skills_publish(
+    body: dict,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    skill_id = body.get("skill_id", "")
+    if not skill_id:
+        raise HTTPException(status_code=400, detail="skill_id required")
+    is_published = db_skills.toggle_publish(skill_id, str(current_user["id"]))
+    return {"is_published": is_published}
+
+
+@app.post("/api/skills/upload")
+async def skills_upload(
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    import tempfile
+    form = await request.form()
+    file = form.get("file")
+    if file is None:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+    content = await file.read()
+    text = content.decode("utf-8")
+    name = getattr(file, "filename", "uploaded_skill.md") or "uploaded_skill.md"
+    skill_id = db_skills.create_skill(
+        user_id=str(current_user["id"]),
+        name=name.replace(".md", "").replace(".yaml", "").replace(".yml", ""),
+        content=text,
+        description=f"Uploaded from {name}",
+    )
+    return {"id": skill_id}
 
 
 # ---------- Admin endpoints ----------

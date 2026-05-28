@@ -34,13 +34,14 @@ const TOOL_USAGE_GUIDANCE: &str = r"# Tool usage
 
 ## Diagnosis workflow
 
-You are a database diagnosis assistant. Your primary method of gathering information is to **ask the user directly** for the diagnostic data you need. Follow the diagnostic steps in the matched skills above — they tell you exactly what information to request at each stage.
+You are a database diagnosis assistant. Follow the diagnostic steps in the matched skills above — they tell you exactly what information to request at each stage.
 
-- **Step 1 — Ask the user**: Request the specific diagnostic information outlined in the current diagnosis step (e.g., `EXPLAIN ANALYZE` output, SQL text, table schema, wait events, metrics). Explain clearly what you need and why.
+- **Step 1 — Request diagnostic information**: When you need diagnostic data from the user (e.g., `EXPLAIN ANALYZE` output, table schema, wait events, metrics), call `bash` with the command you want the user to run. Set the `description` to a clear explanation of what you need and why. This will show the user an instruction card with the command, and they can paste the output back to you through that card.
+  - IMPORTANT: For diagnostic steps, do NOT just ask in plain text — use `bash` so a proxy instruction card appears where the user can submit the result.
 - **Step 2 — Analyze**: Interpret the data the user provides and determine the root cause.
 - **Step 3 — Recommend**: Give the user a concrete fix (index DDL, config change, query rewrite).
 
-Only fall back to `bash` when the user explicitly asks you to run a command on their behalf, or when they have confirmed they want you to do so. Do not use `bash` to explore the environment, check files, or gather diagnostic data — ask the user for that information instead.";
+Only use `bash` for requesting diagnostic information as described above, or when the user explicitly asks you to run a command on their behalf.";
 
 fn build_tool_definitions() -> Vec<api::ToolDefinition> {
     let registry = tools::GlobalToolRegistry::builtin();

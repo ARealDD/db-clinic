@@ -23,9 +23,13 @@ export interface LLMConfig {
   provider: string;
   model: string;
   base_url: string;
-  system_prompt: string;
   api_key?: string;
   has_api_key: boolean;
+  /** @deprecated Legacy single-field system prompt — use system_prompt_role + system_prompt_background + system_prompt_rules */
+  system_prompt?: string;
+  system_prompt_role?: string;
+  system_prompt_background?: string;
+  system_prompt_rules?: string;
 }
 
 // ---------- Session ----------

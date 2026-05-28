@@ -16,7 +16,7 @@ const GRID: React.CSSProperties = {
 };
 
 export default function MySkills() {
-  const { user } = useUser();
+  const { user, logout } = useUser();
   const [skills, setSkills] = useState<Skill[]>([]);
   const [activeIds, setActiveIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -32,11 +32,17 @@ export default function MySkills() {
       setSkills(data.skills);
       setActiveIds(data.active_ids);
     } catch (e) {
-      setMessage(`Failed to load: ${e instanceof Error ? e.message : 'error'}`);
+      const msg = e instanceof Error ? e.message : '';
+      if (msg.includes('expired') || msg.includes('Invalid token') || msg.includes('401')) {
+        // Token expired during session — clear auth state and show login prompt
+        logout();
+        return;
+      }
+      setMessage(`Failed to load: ${msg || 'error'}`);
     } finally {
       setLoading(false);
     }
-  }, [user]);
+  }, [user, logout]);
 
   useEffect(() => {
     loadSkills();

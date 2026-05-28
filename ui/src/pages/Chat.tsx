@@ -3,13 +3,22 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import ChatMessage from '../components/ChatMessage';
-import ThinkingBlock from '../components/ThinkingBlock';
 import ProxyCard from '../components/ProxyCard';
 import ToolSidebar, { type ToolEntryData } from '../components/ToolSidebar';
+import SkillSidebar from '../components/SkillSidebar';
 import SkillSelectorModal from '../components/SkillSelectorModal';
-import type { LLMConfig, WsServerMessage } from '../types';
+import SessionSidebar from '../components/SessionSidebar';
+import type { LLMConfig, WsServerMessage, Session } from '../types';
 
 // ---------- State ----------
+
+interface MatchedSkill {
+  id: string;
+  name: string;
+  category: string;
+  score: number;
+  type: string;
+}
 
 interface ChatState {
   messages: Array<{ id: string; role: 'user' | 'assistant' | 'system'; content: string; isStreaming?: boolean }>;
@@ -26,6 +35,7 @@ interface ChatState {
     status: 'active' | 'submitted' | 'expired' | 'archived';
   }>;
   toolEntries: ToolEntryData[];
+  matchedSkills: MatchedSkill[];
   currentAssistantId: string | null;
   isThinking: boolean;
   thinkingText: string;
@@ -39,7 +49,7 @@ interface ChatState {
 type Action =
   | { type: 'text_delta'; content: string }
   | { type: 'thinking_delta'; content: string }
-  | { type: 'skill_match'; skills: Array<{ id: string; name: string }> }
+  | { type: 'skill_match'; skills: MatchedSkill[] }
   | { type: 'tool_execution'; payload: ToolEntryData }
   | { type: 'proxy_instruction'; payload: ChatState['proxyInstructions'][0] }
   | { type: 'proxy_instruction_expired'; instructionId: string }
@@ -47,7 +57,9 @@ type Action =
   | { type: 'error'; message: string; recoverable: boolean }
   | { type: 'config_checked'; hasApiKey: boolean }
   | { type: 'add_user_message'; content: string }
-  | { type: 'set_input_enabled' };
+  | { type: 'set_input_enabled' }
+  | { type: 'set_messages'; messages: ChatState['messages'] }
+  | { type: 'clear_chat' };
 
 let msgCounter = 0;
 const newId = () => `msg-${++msgCounter}`;
@@ -72,7 +84,6 @@ function chatReducer(state: ChatState, action: Action): ChatState {
         msgs[existingIdx] = { ...msgs[existingIdx], content: msgs[existingIdx].content + action.content, isStreaming: true };
       } else {
         const id = newId();
-        // state.currentAssistantId wasn't set — do it inline
         return { ...state, messages: [...msgs, { id, role: 'assistant', content: action.content, isStreaming: true }], currentAssistantId: id, isThinking: false };
       }
       return { ...state, messages: msgs, isThinking: false };
@@ -81,27 +92,31 @@ function chatReducer(state: ChatState, action: Action): ChatState {
     case 'thinking_delta':
       return { ...state, isThinking: true, thinkingText: state.thinkingText + action.content };
 
-    case 'skill_match': {
-      const skillText = `🧠 **Matched skills:** ${action.skills.map((s) => s.name).join(', ')}`;
+    case 'skill_match':
       return {
         ...state,
-        messages: [...state.messages, { id: newId(), role: 'system', content: skillText }],
+        matchedSkills: action.skills,
         skillCount: action.skills.length,
       };
-    }
 
     case 'tool_execution':
-      return {
-        ...state,
-        toolEntries: [...state.toolEntries, action.payload],
-      };
+      return { ...state, toolEntries: [...state.toolEntries, action.payload] };
 
-    case 'proxy_instruction':
+    case 'proxy_instruction': {
+      const existingIdx = state.proxyInstructions.findIndex(
+        (pi) => pi.instructionId === action.payload.instructionId
+      );
+      if (existingIdx >= 0) {
+        const updated = [...state.proxyInstructions];
+        updated[existingIdx] = action.payload;
+        return { ...state, proxyInstructions: updated };
+      }
       return {
         ...state,
         proxyInstructions: [...state.proxyInstructions, action.payload],
         messages: [...state.messages, { id: newId(), role: 'system', content: `🔧 **需要执行:** ${action.payload.toolName} — ${action.payload.purpose || action.payload.command}` }],
       };
+    }
 
     case 'proxy_instruction_expired':
       return {
@@ -119,9 +134,6 @@ function chatReducer(state: ChatState, action: Action): ChatState {
         thinkingText: '',
         inputDisabled: false,
         messages: state.messages.map((m) => m.isStreaming ? { ...m, isStreaming: false } : m),
-        proxyInstructions: state.proxyInstructions.map((pi) =>
-          pi.status === 'active' ? { ...pi, status: 'archived' as const } : pi
-        ),
         usage: `Tokens: ${action.usage.input_tokens} in / ${action.usage.output_tokens} out`,
       };
 
@@ -135,6 +147,23 @@ function chatReducer(state: ChatState, action: Action): ChatState {
     case 'set_input_enabled':
       return { ...state, inputDisabled: false };
 
+    case 'set_messages':
+      return { ...state, messages: action.messages };
+
+    case 'clear_chat':
+      return {
+        ...state,
+        messages: [],
+        proxyInstructions: [],
+        toolEntries: [],
+        matchedSkills: [],
+        currentAssistantId: null,
+        isThinking: false,
+        thinkingText: '',
+        inputDisabled: false,
+        usage: '',
+      };
+
     default:
       return state;
   }
@@ -144,6 +173,7 @@ const initialState: ChatState = {
   messages: [],
   proxyInstructions: [],
   toolEntries: [],
+  matchedSkills: [],
   currentAssistantId: null,
   isThinking: false,
   thinkingText: '',
@@ -166,12 +196,15 @@ export default function Chat() {
   const [state, dispatch] = useReducer(chatReducer, initialState);
   const [input, setInput] = useState('');
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [status, setStatus] = useState<'initializing' | 'no-config' | 'ready' | 'connecting' | 'connected' | 'error'>('initializing');
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [status, setStatus] = useState<'initializing' | 'no-config' | 'ready' | 'creating' | 'resuming' | 'connecting' | 'connected' | 'error'>('initializing');
   const [toolSidebarVisible, setToolSidebarVisible] = useState(false);
+  const [skillSidebarVisible, setSkillSidebarVisible] = useState(false);
   const [skillSelectorOpen, setSkillSelectorOpen] = useState(false);
   const [skillCount, setSkillCountLocal] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const loadingRef = useRef(false);
 
   const ws = useWebSocket(sessionId);
 
@@ -199,23 +232,14 @@ export default function Chat() {
       .catch(() => {});
   }, []);
 
-  // Create session and connect WS when ready
+  // When 'ready', load sessions and initialize
   useEffect(() => {
-    if (status !== 'ready' || sessionId) return;
-    setStatus('initializing');
-    api<{ session_id: string }>('/api/sessions', {
-      method: 'POST',
-    })
-      .then((s) => {
-        setSessionId(s.session_id);
-      })
-      .catch(() => {
-        setStatus('error');
-        dispatch({ type: 'error', message: 'Failed to create session', recoverable: true });
-      });
-  }, [status, sessionId]);
+    if (status !== 'ready' || loadingRef.current) return;
+    loadingRef.current = true;
+    loadSessionsAndInit();
+  }, [status]);
 
-  // Connect WebSocket when session is ready
+  // Connect WebSocket when sessionId changes
   useEffect(() => {
     if (!sessionId) return;
     setStatus('connecting');
@@ -227,22 +251,115 @@ export default function Chat() {
   useEffect(() => {
     if (ws.status === 'connected') setStatus('connected');
     else if (ws.status === 'error') setStatus('error');
-    else if (ws.status === 'disconnected' && status === 'connected') {
-      // was connected and now disconnected — could reconnect
-    }
   }, [ws.status]);
 
-  // Update status when WS connects
-  useEffect(() => {
-    if (sessionId && ws.status === 'connected') {
-      setStatus('connected');
-    }
-  }, [sessionId, ws.status]);
-
-  // Scroll to bottom on new messages
+  // Scroll to bottom on new messages or proxy instructions
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [state.messages]);
+  }, [state.messages, state.proxyInstructions]);
+
+  // ---------- Session management ----------
+
+  const loadSessionsAndInit = async () => {
+    try {
+      const sessionList = await api<Session[]>('/api/sessions');
+      setSessions(sessionList);
+      if (sessionList.length > 0) {
+        await resumeSession(sessionList[0].session_id, sessionList);
+      } else {
+        await createSession();
+      }
+    } catch (e) {
+      setStatus('error');
+      dispatch({ type: 'error', message: 'Failed to load sessions', recoverable: true });
+    }
+  };
+
+  const resumeSession = async (sid: string, sessionList: Session[]) => {
+    setStatus('resuming');
+    dispatch({ type: 'clear_chat' });
+    try {
+      await api(`/api/sessions/${sid}/resume`, { method: 'POST' });
+    } catch (e) {
+      // Session may have expired — create a new one
+      console.warn('resume failed, creating new session:', e);
+      await createSession();
+      return;
+    }
+    // Load history
+    try {
+      const historyData = await api<{ messages: Array<{ role: string; content: string }> }>(`/api/sessions/${sid}/history`);
+      if (historyData.messages && historyData.messages.length > 0) {
+        const msgs = historyData.messages.map((m) => ({
+          id: newId(),
+          role: (m.role === 'user' || m.role === 'assistant' || m.role === 'system' ? m.role : 'user') as 'user' | 'assistant' | 'system',
+          content: m.content,
+        }));
+        dispatch({ type: 'set_messages', messages: msgs });
+      }
+    } catch (e) {
+      console.warn('load history failed:', e);
+    }
+    setSessionId(sid);
+    setSessions(sessionList);
+  };
+
+  const createSession = async () => {
+    setStatus('creating');
+    try {
+      const data = await api<{ session_id: string; created_at_ms?: number }>('/api/sessions', { method: 'POST' });
+      setSessions((prev) => {
+        const updated = [{ session_id: data.session_id, created_at_ms: data.created_at_ms || 0 }, ...prev];
+        return updated;
+      });
+      setSessionId(data.session_id);
+    } catch (e) {
+      setStatus('error');
+      dispatch({ type: 'error', message: 'Failed to create session', recoverable: true });
+    }
+  };
+
+  const handleSelectSession = async (sid: string) => {
+    if (sid === sessionId || ws.status === 'connecting') return;
+    ws.disconnect();
+    setSessionId(null);
+    await resumeSession(sid, sessions);
+  };
+
+  const handleDeleteSession = async (sid: string) => {
+    try {
+      await api(`/api/sessions/${sid}`, { method: 'DELETE' });
+      const updated = sessions.filter((s) => s.session_id !== sid);
+      setSessions(updated);
+      if (sid === sessionId) {
+        ws.disconnect();
+        setSessionId(null);
+        dispatch({ type: 'clear_chat' });
+        if (updated.length > 0) {
+          await resumeSession(updated[0].session_id, updated);
+        } else {
+          await createSession();
+        }
+      }
+    } catch (e) {
+      console.warn('delete session failed:', e);
+    }
+  };
+
+  const handleCreateSession = async () => {
+    if (status === 'creating' || status === 'resuming') return;
+    ws.disconnect();
+    setSessionId(null);
+    dispatch({ type: 'clear_chat' });
+    await createSession();
+    // Refresh session list
+    try {
+      const sessionList = await api<Session[]>('/api/sessions');
+      setSessions(sessionList);
+    } catch {}
+  };
+
+  // ---------- WS message handling ----------
 
   const handleWsMessage = useCallback((msg: WsServerMessage) => {
     switch (msg.type) {
@@ -292,9 +409,20 @@ export default function Chat() {
         break;
       case 'error':
         dispatch({ type: 'error', message: msg.message, recoverable: msg.recoverable });
+        // Expire all active proxy instructions on proxy-related errors
+        // so the user knows to retry with a fresh message.
+        if (msg.message.includes('proxy instruction') || msg.message.includes('pending proxy')) {
+          state.proxyInstructions.forEach((pi) => {
+            if (pi.status === 'active') {
+              dispatch({
+                type: 'proxy_instruction',
+                payload: { ...pi, status: 'expired' as const },
+              });
+            }
+          });
+        }
         break;
       case 'usage_update':
-        // silently consumed, just like the original
         break;
     }
   }, []);
@@ -314,13 +442,13 @@ export default function Chat() {
 
   const handleProxyResult = (data: { instruction_id: string; tool_use_id: string; output: string; is_error: boolean }) => {
     ws.send({ type: 'proxy_result', ...data });
-    dispatch({
-      type: 'proxy_instruction',
-      payload: {
-        ...state.proxyInstructions.find((pi) => pi.instructionId === data.instruction_id)!,
-        status: 'submitted',
-      },
-    });
+    const found = state.proxyInstructions.find((pi) => pi.instructionId === data.instruction_id);
+    if (found) {
+      dispatch({
+        type: 'proxy_instruction',
+        payload: { ...found, status: 'submitted' as const },
+      });
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -330,14 +458,17 @@ export default function Chat() {
     }
   };
 
-  // Auto-resize textarea
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
     e.target.style.height = 'auto';
     e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
   };
 
-  const statusColor = state.inputDisabled ? 'var(--warning)' : status === 'connected' ? 'var(--success)' : 'var(--text-secondary)';
+  const statusColor = state.inputDisabled
+    ? 'var(--warning)'
+    : status === 'connected'
+    ? 'var(--success)'
+    : 'var(--text-secondary)';
 
   // -------- Render --------
 
@@ -368,102 +499,149 @@ export default function Chat() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-      {/* Status bar */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 12, padding: '8px 16px',
-        borderBottom: '1px solid var(--border)', fontSize: 13, color: 'var(--text-secondary)',
-        background: 'var(--bg-secondary)', flexShrink: 0,
-      }}>
-        <span style={{ width: 8, height: 8, borderRadius: '50%', background: statusColor, display: 'inline-block' }} />
-        <span>{status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting...' : 'Disconnected'}</span>
-        <span style={{ flex: 1 }} />
-        <span style={{ color: 'var(--text-muted)' }}>技能 {state.skillCount || skillCount}</span>
-        <button onClick={() => setSkillSelectorOpen(true)} style={{
-          background: 'none', border: 'none', color: 'var(--link)', cursor: 'pointer',
-          fontSize: 13, textDecoration: 'underline', padding: 0,
-        }}>
-          选择
-        </button>
-        <span style={{ color: 'var(--text-muted)' }}>|</span>
-        <button onClick={() => setToolSidebarVisible((v) => !v)} style={{
-          background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer',
-          fontSize: 13, padding: 0,
-        }}>
-          {toolSidebarVisible ? 'Hide proxy history' : 'Show proxy history'}
-        </button>
-        {state.usage && <span style={{ color: 'var(--text-muted)', marginLeft: 8, fontSize: 12 }}>{state.usage}</span>}
-      </div>
+    <div style={{ display: 'flex', height: '100vh' }}>
+      {/* Session sidebar */}
+      <SessionSidebar
+        sessions={sessions}
+        activeSessionId={sessionId}
+        onSelect={handleSelectSession}
+        onDelete={handleDeleteSession}
+        onCreate={handleCreateSession}
+        loading={status === 'creating' || status === 'resuming'}
+      />
 
-      {/* Messages area */}
-      <div style={{
-        flex: 1, overflow: 'auto', padding: 16, display: 'flex',
-        flexDirection: 'column',
-        marginRight: toolSidebarVisible ? 300 : 0,
-        transition: 'margin-right 0.2s',
-      }}>
-        {state.messages.length === 0 && (
-          <div style={{
-            textAlign: 'center', marginTop: 64, color: 'var(--text-secondary)',
+      {/* Main chat area */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        {/* Status bar */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12, padding: '8px 16px',
+          borderBottom: '1px solid var(--border)', fontSize: 13, color: 'var(--text-secondary)',
+          background: 'var(--bg-secondary)', flexShrink: 0,
+        }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: statusColor, display: 'inline-block' }} />
+          <span>
+            {status === 'connected' ? 'Connected'
+              : status === 'creating' ? 'Creating session...'
+              : status === 'resuming' ? 'Resuming session...'
+              : status === 'connecting' ? 'Connecting...'
+              : 'Disconnected'}
+          </span>
+          {state.isThinking && <span style={{ color: 'var(--warning)', fontSize: 12 }}>Thinking...</span>}
+          <span style={{ flex: 1 }} />
+          <button onClick={() => setSkillSidebarVisible((v) => !v)} style={{
+            background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer',
+            fontSize: 13, padding: 0, textDecoration: 'underline',
           }}>
-            <div style={{ fontSize: 48, marginBottom: 16 }}>🏥</div>
-            <h2 style={{ fontSize: 20, color: 'var(--text-primary)', marginBottom: 8 }}>DB Clinic</h2>
-            <p style={{ fontSize: 14 }}>描述你的数据库问题，开始诊断</p>
+            技能 {state.skillCount || skillCount}
+          </button>
+          <button onClick={() => setSkillSelectorOpen(true)} style={{
+            background: 'none', border: 'none', color: 'var(--link)', cursor: 'pointer',
+            fontSize: 13, textDecoration: 'underline', padding: 0,
+          }}>
+            选择
+          </button>
+          {state.usage && <span style={{ color: 'var(--text-muted)', marginLeft: 8, fontSize: 12 }}>{state.usage}</span>}
+          <span style={{ color: 'var(--text-muted)' }}>|</span>
+          <button onClick={() => setToolSidebarVisible((v) => !v)} style={{
+            background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer',
+            fontSize: 13, padding: 0,
+          }}>
+            tools
+          </button>
+        </div>
+
+        {/* Messages area */}
+        <div style={{
+          flex: 1, overflow: 'auto', padding: 16, display: 'flex',
+          flexDirection: 'column',
+          marginRight: toolSidebarVisible ? 300 : 0,
+          transition: 'margin-right 0.2s',
+        }}>
+          {state.messages.length === 0 && (
+            <div style={{ textAlign: 'center', marginTop: 64, color: 'var(--text-secondary)' }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>🏥</div>
+              <h2 style={{ fontSize: 20, color: 'var(--text-primary)', marginBottom: 8 }}>DB Clinic</h2>
+              <p style={{ fontSize: 14 }}>描述你的数据库问题，开始诊断</p>
+            </div>
+          )}
+
+          {state.messages.map((msg) => (
+            <ChatMessage key={msg.id} role={msg.role} content={msg.content} isStreaming={msg.isStreaming} />
+          ))}
+
+
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Proxy card — fixed above input, always visible when active */}
+        {state.proxyInstructions.filter((pi) => pi.status === 'active').length > 0 && (
+          <div style={{
+            marginRight: toolSidebarVisible ? 300 : 0,
+            transition: 'margin-right 0.2s',
+            borderTop: '1px solid var(--border)',
+            background: 'var(--bg-secondary)',
+            maxHeight: '40vh',
+            overflow: 'auto',
+          }}>
+            {(() => {
+              const actives = state.proxyInstructions.filter((pi) => pi.status === 'active');
+              const last = actives[actives.length - 1];
+              return last ? (
+                <div key={last.instructionId} style={{ padding: '8px 16px' }}>
+                  <ProxyCard instruction={last} onSubmitResult={handleProxyResult} />
+                </div>
+              ) : null;
+            })()}
           </div>
         )}
 
-        {state.messages.map((msg) => (
-          <ChatMessage key={msg.id} role={msg.role} content={msg.content} isStreaming={msg.isStreaming} />
-        ))}
-
-        {state.isThinking && <ThinkingBlock content={state.thinkingText} />}
-
-        {/* Proxy instruction cards */}
-        {state.proxyInstructions.filter((pi) => pi.status === 'active').map((pi) => (
-          <ProxyCard key={pi.instructionId} instruction={pi} onSubmitResult={handleProxyResult} />
-        ))}
-
-        <div ref={messagesEndRef} />
+        {/* Input area */}
+        <div style={{
+          padding: '12px 16px', borderTop: '1px solid var(--border)',
+          background: 'var(--bg-secondary)', display: 'flex', gap: 8,
+          alignItems: 'flex-end',
+          marginRight: toolSidebarVisible ? 300 : 0,
+          transition: 'margin-right 0.2s',
+        }}>
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={handleInputChange}
+            onKeyDown={handleKeyDown}
+            placeholder={state.inputDisabled ? '等待响应...' : '描述数据库问题...'}
+            disabled={state.inputDisabled}
+            rows={1}
+            style={inputStyle}
+          />
+          {state.isThinking || (state.messages.length > 0 && state.inputDisabled) ? (
+            <button onClick={handleCancel} style={{
+              padding: '10px 16px', borderRadius: 8, border: '1px solid var(--border)',
+              background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer',
+              fontSize: 14, whiteSpace: 'nowrap',
+            }}>
+              停止
+            </button>
+          ) : (
+            <button onClick={sendMessage} disabled={!input.trim() || state.inputDisabled} style={{
+              padding: '10px 20px', borderRadius: 8, border: 'none',
+              background: input.trim() && !state.inputDisabled ? 'var(--accent)' : '#555',
+              color: '#fff', fontSize: 14, fontWeight: 600,
+              cursor: input.trim() && !state.inputDisabled ? 'pointer' : 'default',
+              whiteSpace: 'nowrap',
+            }}>
+              发送
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Input area */}
-      <div style={{
-        padding: '12px 16px', borderTop: '1px solid var(--border)',
-        background: 'var(--bg-secondary)', display: 'flex', gap: 8,
-        alignItems: 'flex-end',
-        marginRight: toolSidebarVisible ? 300 : 0,
-        transition: 'margin-right 0.2s',
-      }}>
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={handleInputChange}
-          onKeyDown={handleKeyDown}
-          placeholder={state.inputDisabled ? '等待响应...' : '描述数据库问题...'}
-          disabled={state.inputDisabled}
-          rows={1}
-          style={inputStyle}
-        />
-        {state.isThinking || (state.messages.length > 0 && state.inputDisabled) ? (
-          <button onClick={handleCancel} style={{
-            padding: '10px 16px', borderRadius: 8, border: '1px solid var(--border)',
-            background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer',
-            fontSize: 14, whiteSpace: 'nowrap',
-          }}>
-            停止
-          </button>
-        ) : (
-          <button onClick={sendMessage} disabled={!input.trim() || state.inputDisabled} style={{
-            padding: '10px 20px', borderRadius: 8, border: 'none',
-            background: input.trim() && !state.inputDisabled ? 'var(--accent)' : '#555',
-            color: '#fff', fontSize: 14, fontWeight: 600,
-            cursor: input.trim() && !state.inputDisabled ? 'pointer' : 'default',
-            whiteSpace: 'nowrap',
-          }}>
-            发送
-          </button>
-        )}
-      </div>
+      {/* Skill sidebar */}
+      <SkillSidebar
+        skills={state.matchedSkills}
+        visible={skillSidebarVisible}
+        onClose={() => setSkillSidebarVisible(false)}
+        onSelectSkills={() => setSkillSelectorOpen(true)}
+      />
 
       {/* Tool sidebar */}
       <ToolSidebar

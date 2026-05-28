@@ -17,7 +17,7 @@ SECRET_KEY = os.environ.get(
 )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(
-    os.environ.get("JWT_EXPIRE_MINUTES", "60")
+    os.environ.get("JWT_EXPIRE_MINUTES", "240")
 )
 
 

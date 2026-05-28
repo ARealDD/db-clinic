@@ -19,31 +19,40 @@ interface ProxyCardProps {
 }
 
 const cardStyle: React.CSSProperties = {
-  background: '#2d3139', borderRadius: 8, marginBottom: 12, overflow: 'hidden',
+  background: '#1e2128', borderRadius: 8, marginBottom: 12, overflow: 'hidden',
   border: '1px solid var(--border)',
 };
 
 export default function ProxyCard({ instruction, onSubmitResult }: ProxyCardProps) {
   const [result, setResult] = useState('');
-  const isDone = instruction.status !== 'active';
+  const isActive = instruction.status === 'active';
 
   return (
     <div style={{
       ...cardStyle,
-      opacity: isDone ? 0.6 : 1,
-      borderColor: isDone ? 'var(--border)' : 'var(--warning)',
+      opacity: isActive ? 1 : 0.5,
+      borderColor: isActive ? '#d29922' : 'var(--border)',
+      boxShadow: isActive ? '0 0 12px rgba(210, 153, 34, 0.2)' : 'none',
     }}>
-      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
+      <div style={{
+        padding: '10px 14px', borderBottom: '1px solid var(--border)',
+        background: isActive ? 'rgba(210, 153, 34, 0.08)' : 'transparent',
+      }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
           <span style={{
             fontSize: 11, padding: '2px 8px', borderRadius: 10,
-            background: isDone ? '#555' : 'var(--warning)', color: '#fff', fontWeight: 600,
+            background: isActive ? '#d29922' : '#555', color: '#fff', fontWeight: 600,
           }}>
-            {isDone ? '已完成' : '等待执行'}
+            {isActive ? '等待你输入' : '已完成'}
           </span>
           <span style={{ fontSize: 13, color: 'var(--link)', fontWeight: 600 }}>{instruction.toolName}</span>
           {instruction.readOnly && <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>read-only</span>}
         </div>
+        {isActive && (
+          <div style={{ fontSize: 12, color: '#d29922', marginBottom: 6 }}>
+            ⬇️ 请执行以下命令，将结果粘贴到下方文本框后提交
+          </div>
+        )}
         {instruction.purpose && (
           <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 6 }}>{instruction.purpose}</p>
         )}
@@ -56,12 +65,9 @@ export default function ProxyCard({ instruction, onSubmitResult }: ProxyCardProp
         {instruction.hint && (
           <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>💡 {instruction.hint}</p>
         )}
-        {instruction.targetEnvironment && (
-          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>目标: {instruction.targetEnvironment}</p>
-        )}
       </div>
 
-      {!isDone && (
+      {isActive && (
         <div style={{ padding: '10px 14px' }}>
           <textarea
             value={result}
@@ -84,8 +90,11 @@ export default function ProxyCard({ instruction, onSubmitResult }: ProxyCardProp
               })}
               disabled={!result.trim()}
               style={{
-                padding: '6px 16px', borderRadius: 6, border: 'none', cursor: result.trim() ? 'pointer' : 'default',
-                fontSize: 13, fontWeight: 600, background: result.trim() ? 'var(--success)' : '#555', color: '#fff',
+                padding: '6px 16px', borderRadius: 6, border: 'none',
+                cursor: result.trim() ? 'pointer' : 'default',
+                fontSize: 13, fontWeight: 600,
+                background: result.trim() ? '#238636' : '#555',
+                color: '#fff',
               }}
             >
               提交结果

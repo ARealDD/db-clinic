@@ -22,16 +22,7 @@ export default function ToolSidebar({ entries, visible, onToggle }: ToolSidebarP
   };
 
   if (!visible) {
-    return (
-      <button onClick={onToggle} style={{
-        position: 'fixed', right: 12, top: 12, zIndex: 100,
-        padding: '6px 12px', borderRadius: 6, border: '1px solid var(--border)',
-        background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
-        cursor: 'pointer', fontSize: 13,
-      }}>
-        Show tool history
-      </button>
-    );
+    return null;
   }
 
   const statusColor = (status: string) => {
