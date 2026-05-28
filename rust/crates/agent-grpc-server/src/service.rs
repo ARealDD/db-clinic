@@ -106,8 +106,8 @@ impl AgentService for AgentServiceImpl {
         let manager = self.manager.clone();
         let mock_mode = self.mock_mode;
         let model_clone = model.clone();
-        let (session_id, created_at_ms) = tokio::task::spawn_blocking(move || {
-            manager.create_session(
+        let (session_id, created_at_ms) = manager
+            .create_session(
                 model_clone,
                 req.system_prompts,
                 max_iterations,
@@ -124,9 +124,7 @@ impl AgentService for AgentServiceImpl {
                     Some(req.user_id)
                 },
             )
-        })
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+            .await;
 
         if let Ok(mut guard) = self.pending_proxy_receivers.lock() {
             guard.insert(session_id.clone(), (instruction_rx, timeout_rx));
@@ -204,16 +202,9 @@ impl AgentService for AgentServiceImpl {
                         let instruction_id = proxy_result.instruction_id.clone();
                         let output = proxy_result.output.clone();
                         let is_error = proxy_result.is_error;
-                        let delivered = tokio::task::spawn_blocking(move || {
-                            manager_clone.deliver_proxy_result(
-                                &sid,
-                                &instruction_id,
-                                output,
-                                is_error,
-                            )
-                        })
-                        .await
-                        .unwrap_or(false);
+                        let delivered = manager_clone
+                            .deliver_proxy_result(&sid, &instruction_id, output, is_error)
+                            .await;
                         if !delivered {
                             let _ = tx
                                 .send(Ok(proto::ChatOutput {
@@ -236,11 +227,7 @@ impl AgentService for AgentServiceImpl {
                         }
                     }
                     proto::chat_input::Payload::Cancel(_) => {
-                        let manager_clone = manager.clone();
-                        let sid = session_id.clone();
-                        let _ =
-                            tokio::task::spawn_blocking(move || manager_clone.cancel_turn(&sid))
-                                .await;
+                        manager.cancel_turn(&session_id);
                     }
                 }
             }
@@ -267,13 +254,8 @@ impl AgentService for AgentServiceImpl {
         self.manager.cancel_turn(&session_id);
         let manager = self.manager.clone();
         let sid = session_id.clone();
-        let usage = tokio::task::spawn_blocking(move || {
-            let u = manager.get_usage(&sid);
-            manager.remove_session(&sid);
-            u
-        })
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        let usage = manager.get_usage(&sid).await;
+        manager.remove_session(&sid).await;
 
         tracing::info!(%session_id, "closed session");
 
@@ -330,8 +312,8 @@ impl AgentService for AgentServiceImpl {
         };
 
         let manager = self.manager.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            manager.resume_session(
+        let result = manager
+            .resume_session(
                 &session_id,
                 &data_dir,
                 &user_id,
@@ -341,11 +323,9 @@ impl AgentService for AgentServiceImpl {
                 api_config,
                 proxy_channels,
             )
-        })
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+            .await;
 
-        let (sid, created_at_ms, loaded_messages) = result.map_err(|e| Status::internal(e))?;
+        let (sid, created_at_ms, loaded_messages) = result.map_err(Status::internal)?;
 
         if let Ok(mut guard) = self.pending_proxy_receivers.lock() {
             guard.insert(sid.clone(), (instruction_rx, timeout_rx));
@@ -550,56 +530,77 @@ async fn handle_user_message(
     let sid_for_stream = session_id.to_string();
     let tx_for_stream = tx.clone();
 
-    let (event_tx, event_rx) = std::sync::mpsc::channel::<runtime::AssistantEvent>();
+    // Tokio mpsc instead of std mpsc — Plan ② (B2). The runtime now drives
+    // event emission through `EventSink::try_send` directly into this channel,
+    // and we forward each event to the gRPC client in an async task. No more
+    // sync→async bridge via `spawn_blocking`.
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::channel::<runtime::AssistantEvent>(256);
 
     let stream_forwarder = tokio::spawn(async move {
-        let loop_handle = tokio::runtime::Handle::current();
-        loop_handle
-            .spawn_blocking(move || {
-                while let Ok(event) = event_rx.recv() {
-                    let payload = match &event {
-                        runtime::AssistantEvent::TextDelta(text) => {
-                            Some(proto::chat_output::Payload::TextDelta(proto::TextDelta {
-                                content: text.clone(),
-                            }))
-                        }
-                        runtime::AssistantEvent::Thinking {
-                            thinking,
-                            signature: _,
-                        } => Some(proto::chat_output::Payload::ThinkingDelta(
-                            proto::ThinkingDelta {
-                                content: thinking.clone(),
-                            },
-                        )),
-                        runtime::AssistantEvent::Usage(usage) => Some(
-                            proto::chat_output::Payload::UsageUpdate(proto::TokenUsage {
-                                input_tokens: usage.input_tokens,
-                                output_tokens: usage.output_tokens,
-                                cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                                cache_read_input_tokens: usage.cache_read_input_tokens,
-                            }),
-                        ),
-                        runtime::AssistantEvent::MessageStop
-                        | runtime::AssistantEvent::ToolUse { .. }
-                        | runtime::AssistantEvent::PromptCache(_) => None,
-                    };
-                    if let Some(p) = payload {
-                        let msg = Ok(proto::ChatOutput {
-                            session_id: sid_for_stream.clone(),
-                            payload: Some(p),
-                        });
-                        let _ = tx_for_stream.blocking_send(msg);
-                    }
+        while let Some(event) = event_rx.recv().await {
+            let payload = match &event {
+                runtime::AssistantEvent::TextDelta(text) => {
+                    Some(proto::chat_output::Payload::TextDelta(proto::TextDelta {
+                        content: text.clone(),
+                    }))
                 }
-            })
-            .await
+                runtime::AssistantEvent::Thinking {
+                    thinking,
+                    signature: _,
+                } => Some(proto::chat_output::Payload::ThinkingDelta(
+                    proto::ThinkingDelta {
+                        content: thinking.clone(),
+                    },
+                )),
+                runtime::AssistantEvent::Usage(usage) => Some(
+                    proto::chat_output::Payload::UsageUpdate(proto::TokenUsage {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                        cache_read_input_tokens: usage.cache_read_input_tokens,
+                    }),
+                ),
+                // Emit a "started" tool_execution the moment the LLM
+                // requests the call so the operator-facing sidebar
+                // updates in real time. The corresponding "completed"
+                // / "failed" event is fired after the turn finishes
+                // (see post-turn loop below), and the React reducer
+                // upgrades the same tool_use_id entry in place.
+                runtime::AssistantEvent::ToolUse { id, name, input } => {
+                    Some(proto::chat_output::Payload::ToolExecution(
+                        proto::ToolExecution {
+                            tool_use_id: id.clone(),
+                            tool_name: name.clone(),
+                            input_json: input.clone(),
+                            status: proto::ToolExecutionStatus::ToolExecutionStarted
+                                .into(),
+                            output: String::new(),
+                            is_error: false,
+                            duration_ms: 0,
+                        },
+                    ))
+                }
+                runtime::AssistantEvent::MessageStop
+                | runtime::AssistantEvent::PromptCache(_) => None,
+            };
+            if let Some(p) = payload {
+                let msg = Ok(proto::ChatOutput {
+                    session_id: sid_for_stream.clone(),
+                    payload: Some(p),
+                });
+                if tx_for_stream.send(msg).await.is_err() {
+                    // Outbound stream closed — stop forwarding to avoid
+                    // building up a backlog if the client went away.
+                    break;
+                }
+            }
+        }
     });
 
-    let turn_result = tokio::task::spawn_blocking(move || {
-        mgr.run_turn_streaming(&sid, &user_text, skill_context, event_tx)
-    })
-    .await
-    .unwrap_or(None);
+    let turn_result = mgr
+        .run_turn_streaming(&sid, &user_text, skill_context, event_tx)
+        .await;
 
     let _ = stream_forwarder.await;
 

@@ -5,6 +5,7 @@ archive/
 
 # Rust build artifacts
 rust/target/
+rust/Cargo.lock
 
 # Python generated stubs
 python/generated/
@@ -38,9 +39,33 @@ tests/results/
 ui/node_modules/
 ui/dist/
 
+# Vite build output served by FastAPI. Hashed filenames change every
+# `npm run build`, so we don't track them. Operators must run
+# `cd ui && npm run build` before serving the prod UI on :8001.
+python/static/assets/
+
 # SQLite metadatabase (auto-created at startup)
 python/data/
 *.db
 
 # Rolling log files (created at startup by both Rust and Python services)
 logs/
+
+# Runtime session traces (gRPC server writes one JSONL per session under
+# this directory when no explicit `--data-dir` is provided)
+sessions/
+
+# IDE / editor local settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-generated noise
+.DS_Store
+Thumbs.db
+
+# Local scratch / backup files
+.tmp_*
+*.bak
+*.bak.*

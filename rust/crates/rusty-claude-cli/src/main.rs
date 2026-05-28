@@ -4828,6 +4828,21 @@ impl HookAbortMonitor {
     }
 }
 
+/// Drive an async future to completion on a private current-thread tokio
+/// runtime. Used by sync CLI entry points (`run_turn`, `run_prompt_*`,
+/// internal-prompt helpers) to bridge into the now-async
+/// `ConversationRuntime::run_turn`. Each call builds a short-lived runtime
+/// so the I/O reactor stays scoped to the turn.
+fn block_on_turn<F, T>(future: F) -> Result<T, Box<dyn std::error::Error>>
+where
+    F: std::future::Future<Output = T>,
+{
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    Ok(rt.block_on(future))
+}
+
 impl LiveCli {
     fn new(
         model: String,
@@ -4961,7 +4976,9 @@ impl LiveCli {
             &mut stdout,
         )?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = runtime.run_turn(input, Some(&mut permission_prompter));
+        let result = block_on_turn(async {
+            runtime.run_turn(input, Some(&mut permission_prompter)).await
+        })?;
         hook_abort_monitor.stop();
         match result {
             Ok(summary) => {
@@ -5014,7 +5031,9 @@ impl LiveCli {
     fn run_prompt_compact(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = runtime.run_turn(input, Some(&mut permission_prompter));
+        let result = block_on_turn(async {
+            runtime.run_turn(input, Some(&mut permission_prompter)).await
+        })?;
         hook_abort_monitor.stop();
         let summary = result?;
         self.replace_runtime(runtime)?;
@@ -5027,7 +5046,9 @@ impl LiveCli {
     fn run_prompt_compact_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = runtime.run_turn(input, Some(&mut permission_prompter));
+        let result = block_on_turn(async {
+            runtime.run_turn(input, Some(&mut permission_prompter)).await
+        })?;
         hook_abort_monitor.stop();
         let summary = result?;
         self.replace_runtime(runtime)?;
@@ -5052,7 +5073,9 @@ impl LiveCli {
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = runtime.run_turn(input, Some(&mut permission_prompter));
+        let result = block_on_turn(async {
+            runtime.run_turn(input, Some(&mut permission_prompter)).await
+        })?;
         hook_abort_monitor.stop();
         let summary = result?;
         self.replace_runtime(runtime)?;
@@ -5845,7 +5868,9 @@ impl LiveCli {
             progress,
         )?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let summary = runtime.run_turn(prompt, Some(&mut permission_prompter))?;
+        let summary = block_on_turn(async {
+            runtime.run_turn(prompt, Some(&mut permission_prompter)).await
+        })??;
         let text = final_assistant_text(&summary).trim().to_string();
         runtime.shutdown_plugins()?;
         Ok(text)
@@ -8298,7 +8323,6 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
 // churning `BuiltRuntime` and every Deref/DerefMut site that references
 // it. See ROADMAP #29 for the provider-dispatch routing fix.
 struct AnthropicRuntimeClient {
-    runtime: tokio::runtime::Runtime,
     client: ApiProviderClient,
     session_id: String,
     model: String,
@@ -8363,7 +8387,6 @@ impl AnthropicRuntimeClient {
             }
         };
         Ok(Self {
-            runtime: tokio::runtime::Runtime::new()?,
             client,
             session_id: session_id.to_string(),
             model,
@@ -8389,9 +8412,10 @@ fn resolve_cli_auth_source_for_cwd() -> Result<AuthSource, api::ApiError> {
     resolve_startup_auth_source(|| Ok(None))
 }
 
+#[async_trait::async_trait]
 impl ApiClient for AnthropicRuntimeClient {
     #[allow(clippy::too_many_lines)]
-    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    async fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         if let Some(progress_reporter) = &self.progress_reporter {
             progress_reporter.mark_model_phase();
         }
@@ -8410,32 +8434,30 @@ impl ApiClient for AnthropicRuntimeClient {
             ..Default::default()
         };
 
-        self.runtime.block_on(async {
-            // When resuming after tool execution, apply a stall timeout on the
-            // first stream event.  If the model does not respond within the
-            // deadline we drop the stalled connection and re-send the request as
-            // a continuation nudge (one retry only).
-            let max_attempts: usize = if is_post_tool { 2 } else { 1 };
+        // When resuming after tool execution, apply a stall timeout on the
+        // first stream event.  If the model does not respond within the
+        // deadline we drop the stalled connection and re-send the request as
+        // a continuation nudge (one retry only).
+        let max_attempts: usize = if is_post_tool { 2 } else { 1 };
 
-            for attempt in 1..=max_attempts {
-                let result = self
-                    .consume_stream(&message_request, is_post_tool && attempt == 1)
-                    .await;
-                match result {
-                    Ok(events) => return Ok(events),
-                    Err(error)
-                        if error.to_string().contains("post-tool stall")
-                            && attempt < max_attempts =>
-                    {
-                        // Stalled after tool completion — nudge the model by
-                        // re-sending the same request.
-                    }
-                    Err(error) => return Err(error),
+        for attempt in 1..=max_attempts {
+            let result = self
+                .consume_stream(&message_request, is_post_tool && attempt == 1)
+                .await;
+            match result {
+                Ok(events) => return Ok(events),
+                Err(error)
+                    if error.to_string().contains("post-tool stall")
+                        && attempt < max_attempts =>
+                {
+                    // Stalled after tool completion — nudge the model by
+                    // re-sending the same request.
                 }
+                Err(error) => return Err(error),
             }
+        }
 
-            Err(RuntimeError::new("post-tool continuation nudge exhausted"))
-        })
+        Err(RuntimeError::new("post-tool continuation nudge exhausted"))
     }
 }
 
@@ -8457,7 +8479,7 @@ impl AnthropicRuntimeClient {
             })?;
         let mut stdout = io::stdout();
         let mut sink = io::sink();
-        let out: &mut dyn Write = if self.emit_output {
+        let out: &mut (dyn Write + Send) = if self.emit_output {
             &mut stdout
         } else {
             &mut sink
@@ -9695,8 +9717,9 @@ impl CliToolExecutor {
     }
 }
 
+#[async_trait::async_trait]
 impl ToolExecutor for CliToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         if self
             .allowed_tools
             .as_ref()

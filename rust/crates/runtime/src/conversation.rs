@@ -3,8 +3,10 @@ use std::fmt::{Display, Formatter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde_json::{Map, Value};
 use telemetry::SessionTracer;
+use tokio_util::sync::CancellationToken;
 
 use crate::compact::{
     compact_session, estimate_session_tokens, CompactionConfig, CompactionResult,
@@ -56,8 +58,18 @@ pub struct PromptCacheEvent {
 }
 
 /// Minimal streaming API contract required by [`ConversationRuntime`].
-pub trait ApiClient {
-    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
+///
+/// Async since Plan ② (B2): the runtime itself is now driven on a Tokio
+/// reactor, and all upstream HTTP calls are async by nature. Using
+/// [`async_trait`] keeps the trait dyn-compatible in case future call-sites
+/// need a `Box<dyn ApiClient>` — the current runtime takes a generic `C` so
+/// the cost is purely cosmetic.
+#[async_trait]
+pub trait ApiClient: Send {
+    async fn stream(
+        &mut self,
+        request: ApiRequest,
+    ) -> Result<Vec<AssistantEvent>, RuntimeError>;
 
     /// Model identifier surfaced for observability (prompt logs, tracing).
     /// Default `""` keeps existing implementors compiling; concrete clients
@@ -97,8 +109,14 @@ pub trait TurnObserver: Send + Sync {
 }
 
 /// Trait implemented by tool dispatchers that execute model-requested tools.
-pub trait ToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
+///
+/// Async since Plan ② (B2): the proxy executor needs to await on
+/// [`tokio::sync::oneshot`] receivers and a [`CancellationToken`] without
+/// blocking the worker. Local executors stay synchronous internally and just
+/// wrap their bodies in an async fn.
+#[async_trait]
+pub trait ToolExecutor: Send {
+    async fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 }
 
 /// Error returned when a tool invocation fails locally.
@@ -155,7 +173,7 @@ pub struct ConversationRuntime<C, T> {
     hook_runner: HookRunner,
     auto_compaction_input_tokens_threshold: u32,
     hook_abort_signal: HookAbortSignal,
-    hook_progress_reporter: Option<Box<dyn HookProgressReporter>>,
+    hook_progress_reporter: Option<Box<dyn HookProgressReporter + Send>>,
     session_tracer: Option<SessionTracer>,
     /// External cancel signal. When set, the iteration loop exits with
     /// `Err("turn cancelled")` before the next LLM call. Used by the chat
@@ -164,6 +182,12 @@ pub struct ConversationRuntime<C, T> {
     /// call as a normal tool failure and keeps looping into more LLM calls
     /// until `max_iterations`.
     cancel_signal: Option<Arc<AtomicBool>>,
+    /// Plan ② cancel token. Mirrors `cancel_signal` semantically — flipping
+    /// either path aborts the turn — but `CancellationToken` is awaitable,
+    /// which the proxy executor needs so it can race a long oneshot recv
+    /// against cancel without polling. The atomic flag stays around because
+    /// some sync code paths (hook abort, health probe) cannot await.
+    cancel_token: Option<CancellationToken>,
     /// Optional pre-stream observer; see [`TurnObserver`]. Wrapped in `Arc`
     /// so observer state can be shared between many runtimes (the gRPC
     /// server keeps one logger handle for the whole process).
@@ -218,6 +242,7 @@ where
             hook_progress_reporter: None,
             session_tracer: None,
             cancel_signal: None,
+            cancel_token: None,
             turn_observer: None,
         }
     }
@@ -243,7 +268,7 @@ where
     #[must_use]
     pub fn with_hook_progress_reporter(
         mut self,
-        hook_progress_reporter: Box<dyn HookProgressReporter>,
+        hook_progress_reporter: Box<dyn HookProgressReporter + Send>,
     ) -> Self {
         self.hook_progress_reporter = Some(hook_progress_reporter);
         self
@@ -261,6 +286,17 @@ where
     #[must_use]
     pub fn with_cancel_signal(mut self, signal: Arc<AtomicBool>) -> Self {
         self.cancel_signal = Some(signal);
+        self
+    }
+
+    /// Attach a [`CancellationToken`] used by the proxy executor (and any
+    /// other awaitable wait point) to abort without polling. Independent of
+    /// [`Self::with_cancel_signal`] — the runtime treats either path as a
+    /// cancel. Callers usually wire both: the atomic for sync hook code, the
+    /// token for async wait points.
+    #[must_use]
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = Some(token);
         self
     }
 
@@ -345,7 +381,7 @@ where
 
     /// Run a session health probe to verify the runtime is functional after compaction.
     /// Returns Ok(()) if healthy, Err if the session appears broken.
-    fn run_session_health_probe(&mut self) -> Result<(), String> {
+    async fn run_session_health_probe(&mut self) -> Result<(), String> {
         // Check if we have basic session integrity
         if self.session.messages.is_empty() && self.session.compaction.is_some() {
             // Freshly compacted with no messages - this is normal
@@ -355,23 +391,29 @@ where
         // Verify tool executor is responsive with a non-destructive probe
         // Using glob_search with a pattern that won't match anything
         let probe_input = r#"{"pattern": "*.health-check-probe-"}"#;
-        match self.tool_executor.execute("glob_search", probe_input) {
+        match self.tool_executor.execute("glob_search", probe_input).await {
             Ok(_) => Ok(()),
             Err(e) => Err(format!("Tool executor probe failed: {e}")),
         }
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn run_turn(
+    pub async fn run_turn(
         &mut self,
-        user_input: impl Into<String>,
+        user_input: impl Into<String> + Send,
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
         let user_input = user_input.into();
+        let session_id = self.session.session_id.clone();
+        tracing::debug!(
+            session_id = %session_id,
+            input_len = user_input.len(),
+            "run_turn: entering"
+        );
 
         // ROADMAP #38: Session-health canary - probe if context was compacted
         if self.session.compaction.is_some() {
-            if let Err(error) = self.run_session_health_probe() {
+            if let Err(error) = self.run_session_health_probe().await {
                 return Err(RuntimeError::SessionState(format!(
                     "Session health probe failed after compaction: {error}. \
                      The session may be in an inconsistent state. \
@@ -400,6 +442,23 @@ where
 
             if let Some(signal) = &self.cancel_signal {
                 if signal.load(Ordering::Relaxed) {
+                    tracing::info!(
+                        session_id = %session_id,
+                        iterations,
+                        "run_turn: cancelled via atomic flag before LLM call"
+                    );
+                    let error = RuntimeError::Cancelled;
+                    self.record_turn_failed(iterations, &error);
+                    return Err(error);
+                }
+            }
+            if let Some(token) = &self.cancel_token {
+                if token.is_cancelled() {
+                    tracing::info!(
+                        session_id = %session_id,
+                        iterations,
+                        "run_turn: cancelled via CancellationToken before LLM call"
+                    );
                     let error = RuntimeError::Cancelled;
                     self.record_turn_failed(iterations, &error);
                     return Err(error);
@@ -419,9 +478,30 @@ where
                     iterations,
                 );
             }
-            let events = match self.api_client.stream(request) {
-                Ok(events) => events,
+            tracing::debug!(
+                session_id = %session_id,
+                iterations,
+                model = self.api_client.model(),
+                provider = self.api_client.provider(),
+                "run_turn: dispatching LLM stream call"
+            );
+            let events = match self.api_client.stream(request).await {
+                Ok(events) => {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        iterations,
+                        event_count = events.len(),
+                        "run_turn: LLM stream returned"
+                    );
+                    events
+                }
                 Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        iterations,
+                        %error,
+                        "run_turn: LLM stream failed"
+                    );
                     self.record_turn_failed(iterations, &error);
                     return Err(error);
                 }
@@ -513,10 +593,35 @@ where
                 let result_message = match permission_outcome {
                     PermissionOutcome::Allow => {
                         self.record_tool_started(iterations, &tool_name);
+                        tracing::debug!(
+                            session_id = %session_id,
+                            iterations,
+                            tool = %tool_name,
+                            input_len = effective_input.len(),
+                            "run_turn: dispatching tool"
+                        );
                         let (mut output, mut is_error) =
-                            match self.tool_executor.execute(&tool_name, &effective_input) {
-                                Ok(output) => (output, false),
-                                Err(error) => (error.to_string(), true),
+                            match self.tool_executor.execute(&tool_name, &effective_input).await {
+                                Ok(output) => {
+                                    tracing::debug!(
+                                        session_id = %session_id,
+                                        iterations,
+                                        tool = %tool_name,
+                                        output_len = output.len(),
+                                        "run_turn: tool returned ok"
+                                    );
+                                    (output, false)
+                                }
+                                Err(error) => {
+                                    tracing::debug!(
+                                        session_id = %session_id,
+                                        iterations,
+                                        tool = %tool_name,
+                                        %error,
+                                        "run_turn: tool returned err"
+                                    );
+                                    (error.to_string(), true)
+                                }
                             };
                         output = merge_hook_feedback(pre_hook_result.messages(), output, false);
 
@@ -864,7 +969,7 @@ fn merge_hook_feedback(messages: &[String], output: String, is_error: bool) -> S
     sections.join("\n\n")
 }
 
-type ToolHandler = Box<dyn FnMut(&str) -> Result<String, ToolError>>;
+type ToolHandler = Box<dyn FnMut(&str) -> Result<String, ToolError> + Send>;
 
 /// Simple in-memory tool executor for tests and lightweight integrations.
 #[derive(Default)]
@@ -882,15 +987,16 @@ impl StaticToolExecutor {
     pub fn register(
         mut self,
         tool_name: impl Into<String>,
-        handler: impl FnMut(&str) -> Result<String, ToolError> + 'static,
+        handler: impl FnMut(&str) -> Result<String, ToolError> + Send + 'static,
     ) -> Self {
         self.handlers.insert(tool_name.into(), Box::new(handler));
         self
     }
 }
 
+#[async_trait]
 impl ToolExecutor for StaticToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         self.handlers
             .get_mut(tool_name)
             .ok_or_else(|| ToolError::new(format!("unknown tool: {tool_name}")))?(input)
@@ -914,6 +1020,7 @@ mod tests {
     use crate::session::{ContentBlock, MessageRole, Session};
     use crate::usage::TokenUsage;
     use crate::ToolError;
+    use async_trait::async_trait;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -924,8 +1031,10 @@ mod tests {
         call_count: usize,
     }
 
+    #[async_trait]
+
     impl ApiClient for ScriptedApiClient {
-        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        async fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
             self.call_count += 1;
             match self.call_count {
                 1 => {
@@ -989,8 +1098,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn runs_user_to_tool_to_result_loop_end_to_end_and_tracks_usage() {
+    #[tokio::test]
+    async fn runs_user_to_tool_to_result_loop_end_to_end_and_tracks_usage() {
         let api_client = ScriptedApiClient { call_count: 0 };
         let tool_executor = StaticToolExecutor::new().register("add", |input| {
             let total = input
@@ -1020,7 +1129,7 @@ mod tests {
         );
 
         let summary = runtime
-            .run_turn("what is 2 + 2?", Some(&mut PromptAllowOnce))
+            .run_turn("what is 2 + 2?", Some(&mut PromptAllowOnce)).await
             .expect("conversation loop should succeed");
 
         assert_eq!(summary.iterations, 2);
@@ -1043,8 +1152,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn records_runtime_session_trace_events() {
+    #[tokio::test]
+    async fn records_runtime_session_trace_events() {
         let sink = Arc::new(MemoryTelemetrySink::default());
         let tracer = SessionTracer::new("session-runtime", sink.clone());
         let mut runtime = ConversationRuntime::new(
@@ -1057,7 +1166,7 @@ mod tests {
         .with_session_tracer(tracer);
 
         runtime
-            .run_turn("what is 2 + 2?", Some(&mut PromptAllowOnce))
+            .run_turn("what is 2 + 2?", Some(&mut PromptAllowOnce)).await
             .expect("conversation loop should succeed");
 
         let events = sink.events();
@@ -1076,8 +1185,8 @@ mod tests {
         assert!(trace_names.contains(&"turn_completed"));
     }
 
-    #[test]
-    fn records_denied_tool_results_when_prompt_rejects() {
+    #[tokio::test]
+    async fn records_denied_tool_results_when_prompt_rejects() {
         struct RejectPrompter;
         impl PermissionPrompter for RejectPrompter {
             fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
@@ -1088,8 +1197,9 @@ mod tests {
         }
 
         struct SingleCallApiClient;
+        #[async_trait]
         impl ApiClient for SingleCallApiClient {
-            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            async fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
                 if request
                     .messages
                     .iter()
@@ -1120,7 +1230,7 @@ mod tests {
         );
 
         let summary = runtime
-            .run_turn("use the tool", Some(&mut RejectPrompter))
+            .run_turn("use the tool", Some(&mut RejectPrompter)).await
             .expect("conversation should continue after denied tool");
 
         assert_eq!(summary.tool_results.len(), 1);
@@ -1130,11 +1240,12 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn denies_tool_use_when_pre_tool_hook_blocks() {
+    #[tokio::test]
+    async fn denies_tool_use_when_pre_tool_hook_blocks() {
         struct SingleCallApiClient;
+        #[async_trait]
         impl ApiClient for SingleCallApiClient {
-            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            async fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
                 if request
                     .messages
                     .iter()
@@ -1172,7 +1283,7 @@ mod tests {
         );
 
         let summary = runtime
-            .run_turn("use the tool", None)
+            .run_turn("use the tool", None).await
             .expect("conversation should continue after hook denial");
 
         assert_eq!(summary.tool_results.len(), 1);
@@ -1192,11 +1303,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn denies_tool_use_when_pre_tool_hook_fails() {
+    #[tokio::test]
+    async fn denies_tool_use_when_pre_tool_hook_fails() {
         struct SingleCallApiClient;
+        #[async_trait]
         impl ApiClient for SingleCallApiClient {
-            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            async fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
                 if request
                     .messages
                     .iter()
@@ -1236,7 +1348,7 @@ mod tests {
 
         // when
         let summary = runtime
-            .run_turn("use the tool", None)
+            .run_turn("use the tool", None).await
             .expect("conversation should continue after hook failure");
 
         // then
@@ -1257,14 +1369,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn appends_post_tool_hook_feedback_to_tool_result() {
+    #[tokio::test]
+    async fn appends_post_tool_hook_feedback_to_tool_result() {
         struct TwoCallApiClient {
             calls: usize,
         }
 
+        #[async_trait]
+
         impl ApiClient for TwoCallApiClient {
-            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            async fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
                 self.calls += 1;
                 match self.calls {
                     1 => Ok(vec![
@@ -1304,7 +1418,7 @@ mod tests {
         );
 
         let summary = runtime
-            .run_turn("use add", None)
+            .run_turn("use add", None).await
             .expect("tool loop succeeds");
 
         assert_eq!(summary.tool_results.len(), 1);
@@ -1332,14 +1446,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn appends_post_tool_use_failure_hook_feedback_to_tool_result() {
+    #[tokio::test]
+    async fn appends_post_tool_use_failure_hook_feedback_to_tool_result() {
         struct TwoCallApiClient {
             calls: usize,
         }
 
+        #[async_trait]
+
         impl ApiClient for TwoCallApiClient {
-            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            async fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
                 self.calls += 1;
                 match self.calls {
                     1 => Ok(vec![
@@ -1382,7 +1498,7 @@ mod tests {
 
         // when
         let summary = runtime
-            .run_turn("use fail", None)
+            .run_turn("use fail", None).await
             .expect("tool loop succeeds");
 
         // then
@@ -1411,11 +1527,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reconstructs_usage_tracker_from_restored_session() {
+    #[tokio::test]
+    async fn reconstructs_usage_tracker_from_restored_session() {
         struct SimpleApi;
+        #[async_trait]
         impl ApiClient for SimpleApi {
-            fn stream(
+            async fn stream(
                 &mut self,
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1453,11 +1570,12 @@ mod tests {
         assert_eq!(runtime.usage().cumulative_usage().total_tokens(), 21);
     }
 
-    #[test]
-    fn compacts_session_after_turns() {
+    #[tokio::test]
+    async fn compacts_session_after_turns() {
         struct SimpleApi;
+        #[async_trait]
         impl ApiClient for SimpleApi {
-            fn stream(
+            async fn stream(
                 &mut self,
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1475,9 +1593,9 @@ mod tests {
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             vec!["system".to_string()],
         );
-        runtime.run_turn("a", None).expect("turn a");
-        runtime.run_turn("b", None).expect("turn b");
-        runtime.run_turn("c", None).expect("turn c");
+        runtime.run_turn("a", None).await.expect("turn a");
+        runtime.run_turn("b", None).await.expect("turn b");
+        runtime.run_turn("c", None).await.expect("turn c");
 
         let result = runtime.compact(CompactionConfig {
             preserve_recent_messages: 2,
@@ -1495,11 +1613,12 @@ mod tests {
         assert!(result.compacted_session.compaction.is_some());
     }
 
-    #[test]
-    fn persists_conversation_turn_messages_to_jsonl_session() {
+    #[tokio::test]
+    async fn persists_conversation_turn_messages_to_jsonl_session() {
         struct SimpleApi;
+        #[async_trait]
         impl ApiClient for SimpleApi {
-            fn stream(
+            async fn stream(
                 &mut self,
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1521,7 +1640,7 @@ mod tests {
         );
 
         runtime
-            .run_turn("persist this turn", None)
+            .run_turn("persist this turn", None).await
             .expect("turn should succeed");
 
         let restored = Session::load_from_path(&path).expect("persisted session should reload");
@@ -1533,8 +1652,8 @@ mod tests {
         assert_eq!(restored.session_id, runtime.session().session_id);
     }
 
-    #[test]
-    fn forks_runtime_session_without_mutating_original() {
+    #[tokio::test]
+    async fn forks_runtime_session_without_mutating_original() {
         let mut session = Session::new();
         session
             .push_user_text("branch me")
@@ -1580,11 +1699,12 @@ mod tests {
         script.to_string()
     }
 
-    #[test]
-    fn auto_compacts_when_cumulative_input_threshold_is_crossed() {
+    #[tokio::test]
+    async fn auto_compacts_when_cumulative_input_threshold_is_crossed() {
         struct SimpleApi;
+        #[async_trait]
         impl ApiClient for SimpleApi {
-            fn stream(
+            async fn stream(
                 &mut self,
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1623,7 +1743,7 @@ mod tests {
         .with_auto_compaction_input_tokens_threshold(100_000);
 
         let summary = runtime
-            .run_turn("trigger", None)
+            .run_turn("trigger", None).await
             .expect("turn should succeed");
 
         assert_eq!(
@@ -1635,11 +1755,12 @@ mod tests {
         assert_eq!(runtime.session().messages[0].role, MessageRole::System);
     }
 
-    #[test]
-    fn skips_auto_compaction_below_threshold() {
+    #[tokio::test]
+    async fn skips_auto_compaction_below_threshold() {
         struct SimpleApi;
+        #[async_trait]
         impl ApiClient for SimpleApi {
-            fn stream(
+            async fn stream(
                 &mut self,
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1666,14 +1787,14 @@ mod tests {
         .with_auto_compaction_input_tokens_threshold(100_000);
 
         let summary = runtime
-            .run_turn("trigger", None)
+            .run_turn("trigger", None).await
             .expect("turn should succeed");
         assert_eq!(summary.auto_compaction, None);
         assert_eq!(runtime.session().messages.len(), 2);
     }
 
-    #[test]
-    fn auto_compaction_threshold_defaults_and_parses_values() {
+    #[tokio::test]
+    async fn auto_compaction_threshold_defaults_and_parses_values() {
         assert_eq!(
             parse_auto_compaction_threshold(None),
             DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD
@@ -1689,11 +1810,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compaction_health_probe_blocks_turn_when_tool_executor_is_broken() {
+    #[tokio::test]
+    async fn compaction_health_probe_blocks_turn_when_tool_executor_is_broken() {
         struct SimpleApi;
+        #[async_trait]
         impl ApiClient for SimpleApi {
-            fn stream(
+            async fn stream(
                 &mut self,
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1719,7 +1841,7 @@ mod tests {
         );
 
         let error = runtime
-            .run_turn("trigger", None)
+            .run_turn("trigger", None).await
             .expect_err("health probe failure should abort the turn");
         assert!(
             error
@@ -1733,11 +1855,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compaction_health_probe_skips_empty_compacted_session() {
+    #[tokio::test]
+    async fn compaction_health_probe_skips_empty_compacted_session() {
         struct SimpleApi;
+        #[async_trait]
         impl ApiClient for SimpleApi {
-            fn stream(
+            async fn stream(
                 &mut self,
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1765,14 +1888,14 @@ mod tests {
         );
 
         let summary = runtime
-            .run_turn("trigger", None)
+            .run_turn("trigger", None).await
             .expect("empty compacted session should not fail health probe");
         assert_eq!(summary.auto_compaction, None);
         assert_eq!(runtime.session().messages.len(), 2);
     }
 
-    #[test]
-    fn build_assistant_message_requires_message_stop_event() {
+    #[tokio::test]
+    async fn build_assistant_message_requires_message_stop_event() {
         // given
         let events = vec![AssistantEvent::TextDelta("hello".to_string())];
 
@@ -1786,8 +1909,8 @@ mod tests {
             .contains("assistant stream ended without a message stop event"));
     }
 
-    #[test]
-    fn build_assistant_message_requires_content() {
+    #[tokio::test]
+    async fn build_assistant_message_requires_content() {
         // given
         let events = vec![AssistantEvent::MessageStop];
 
@@ -1801,8 +1924,8 @@ mod tests {
             .contains("assistant stream produced no content"));
     }
 
-    #[test]
-    fn build_assistant_message_places_thinking_block_before_text_and_tool_use() {
+    #[tokio::test]
+    async fn build_assistant_message_places_thinking_block_before_text_and_tool_use() {
         // given
         let events = vec![
             AssistantEvent::Thinking {
@@ -1842,26 +1965,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn static_tool_executor_rejects_unknown_tools() {
+    #[tokio::test]
+    async fn static_tool_executor_rejects_unknown_tools() {
         // given
         let mut executor = StaticToolExecutor::new();
 
         // when
         let error = executor
             .execute("missing", "{}")
+            .await
             .expect_err("unregistered tools should fail");
 
         // then
         assert_eq!(error.to_string(), "unknown tool: missing");
     }
 
-    #[test]
-    fn run_turn_errors_when_max_iterations_is_exceeded() {
+    #[tokio::test]
+    async fn run_turn_errors_when_max_iterations_is_exceeded() {
         struct LoopingApi;
 
+        #[async_trait]
+
         impl ApiClient for LoopingApi {
-            fn stream(
+            async fn stream(
                 &mut self,
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1888,7 +2014,7 @@ mod tests {
 
         // when
         let error = runtime
-            .run_turn("loop", None)
+            .run_turn("loop", None).await
             .expect_err("conversation loop should stop after the configured limit");
 
         // then
@@ -1897,12 +2023,14 @@ mod tests {
             .contains("conversation loop exceeded the maximum number of iterations"));
     }
 
-    #[test]
-    fn run_turn_propagates_api_errors() {
+    #[tokio::test]
+    async fn run_turn_propagates_api_errors() {
         struct FailingApi;
 
+        #[async_trait]
+
         impl ApiClient for FailingApi {
-            fn stream(
+            async fn stream(
                 &mut self,
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1921,7 +2049,7 @@ mod tests {
 
         // when
         let error = runtime
-            .run_turn("hello", None)
+            .run_turn("hello", None).await
             .expect_err("API failures should propagate");
 
         // then

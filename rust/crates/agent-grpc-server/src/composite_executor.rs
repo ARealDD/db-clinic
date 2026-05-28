@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use async_trait::async_trait;
 use runtime::{ToolError, ToolExecutor};
 
 use crate::local_executor::LocalToolExecutor;
@@ -31,17 +32,21 @@ impl CompositeToolExecutor {
     }
 }
 
+#[async_trait]
 impl ToolExecutor for CompositeToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         if self.disabled_tools.contains(tool_name) {
+            tracing::debug!(tool_name, "CompositeToolExecutor: rejecting disabled tool");
             return Err(ToolError::new(format!(
                 "tool `{tool_name}` is disabled in this deployment (network/MCP tools are off)",
             )));
         }
         if self.proxy_tools.contains(tool_name) {
-            return self.proxy.execute(tool_name, input);
+            tracing::debug!(tool_name, "CompositeToolExecutor: routing to proxy");
+            return self.proxy.execute(tool_name, input).await;
         }
-        self.local.execute(tool_name, input)
+        tracing::debug!(tool_name, "CompositeToolExecutor: routing to local");
+        self.local.execute(tool_name, input).await
     }
 }
 

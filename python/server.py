@@ -2,7 +2,7 @@
 """FastAPI gateway for DB Diagnosis Assistant — Python 3.9 compatible."""
 from __future__ import annotations
 
-import sys, os, json, queue, threading, logging, logging.handlers
+import asyncio, sys, os, json, queue, threading, logging, logging.handlers
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 import db
 import db_skills
+import paths
 from models import UserRegister, UserLogin, TokenResponse, UserResponse, LLMConfig
 from tool_usage_guidance import TOOL_USAGE_GUIDANCE
 
@@ -132,9 +133,13 @@ async def _global_exception_handler(request: Request, exc: Exception):
 
 @app.middleware("http")
 async def _no_cache_html(request: Request, call_next):
+    # Force revalidation on the SPA shell so frontend/backend lockstep upgrades
+    # take effect on the next page load. Vite-emitted assets under
+    # /static/assets/ are content-hashed and intentionally NOT touched here —
+    # they should ride the browser's strong cache.
     response = await call_next(request)
     path = request.url.path
-    if path.endswith((".html", ".js")) or path in ("/", "/login"):
+    if path == "/" or path.endswith("/index.html"):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -208,8 +213,35 @@ async def require_admin(
     return current_user
 
 
-def _grpc_channel():
-    return grpc.insecure_channel(GRPC_ADDR)
+# Process-wide gRPC channel + stub. gRPC channels are thread-safe and meant
+# to be shared across calls; opening one per request adds 10–50 ms of TCP/HTTP-2
+# handshake to every RPC and burns ephemeral ports at high QPS. We create it
+# lazily on first use so import-order doesn't matter, then reuse forever.
+_GRPC_CHANNEL = None
+_GRPC_STUB = None
+_GRPC_INIT_LOCK = threading.Lock()
+
+
+def _grpc_stub():
+    global _GRPC_CHANNEL, _GRPC_STUB
+    if _GRPC_STUB is None:
+        with _GRPC_INIT_LOCK:
+            if _GRPC_STUB is None:
+                _GRPC_CHANNEL = grpc.insecure_channel(GRPC_ADDR)
+                _GRPC_STUB = agent_pb2_grpc.AgentServiceStub(_GRPC_CHANNEL)
+    return _GRPC_STUB
+
+
+async def _grpc_unary(method_name: str, request):
+    # Run a synchronous unary gRPC stub call on a worker thread so the event
+    # loop stays responsive. The Rust kernel serializes commands through one
+    # actor thread; a turn that's mid-proxy_executor wait can keep that
+    # thread parked for up to 30 min, so a naive `stub.X(req)` here freezes
+    # every other coroutine — including active WebSocket send_loops.
+    def _sync():
+        stub = _grpc_stub()
+        return getattr(stub, method_name)(request)
+    return await asyncio.to_thread(_sync)
 
 
 # ---------- Auth endpoints ----------
@@ -232,7 +264,6 @@ async def register(body: UserRegister):
     created = await db.get_user_by_id(user_id)
     role = created["role"] if created else "user"
     token = auth_mod.create_access_token({"sub": str(user_id), "role": role})
-    db_skills.ensure_user_exists(str(user_id), body.username)
     log.info("registered user %s (id=%s)", body.username, user_id)
     return TokenResponse(access_token=token)
 
@@ -246,7 +277,6 @@ async def login(body: UserLogin):
             detail="Incorrect username or password",
         )
     token = auth_mod.create_access_token({"sub": str(user["id"]), "role": user.get("role", "user")})
-    db_skills.ensure_user_exists(str(user["id"]), user["username"])
     log.info("logged in user %s (id=%s)", user["username"], user["id"])
     return TokenResponse(access_token=token)
 
@@ -337,11 +367,6 @@ async def favicon():
     return Response(status_code=204)
 
 
-@app.get("/login")
-async def login_page():
-    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "login.html"))
-
-
 # ---------- Config endpoints ----------
 
 @app.post("/api/config")
@@ -373,7 +398,7 @@ async def get_config(
     }
 
 
-_SESSION_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+_SESSION_DATA_DIR = str(paths.DATA_DIR)
 
 
 @app.get("/api/system_prompt/preview")
@@ -418,15 +443,16 @@ async def create_session(
         )
 
     try:
-        with _grpc_channel() as ch:
-            stub = agent_pb2_grpc.AgentServiceStub(ch)
-            resp = stub.CreateSession(agent_pb2.CreateSessionRequest(
+        resp = await _grpc_unary(
+            "CreateSession",
+            agent_pb2.CreateSessionRequest(
                 model=model,
                 system_prompts=system_prompts,
                 api_config=api_config,
                 data_dir=_SESSION_DATA_DIR,
                 user_id=current_user["username"],
-            ))
+            ),
+        )
     except grpc.RpcError as e:
         log.error("CreateSession gRPC error: code=%s detail=%s", e.code(), e.details())
         raise HTTPException(
@@ -494,13 +520,14 @@ async def fork_session(
             base_url=config.base_url,
         )
 
-    with _grpc_channel() as ch:
-        stub = agent_pb2_grpc.AgentServiceStub(ch)
-        resp = stub.CreateSession(agent_pb2.CreateSessionRequest(
+    resp = await _grpc_unary(
+        "CreateSession",
+        agent_pb2.CreateSessionRequest(
             model=model,
             system_prompts=base_segments + [fork_prompt],
             api_config=api_config,
-        ))
+        ),
+    )
     log.info(
         "forked session %s from parent %s (task=%r, deliverable=%s, units=%d, user=%s)",
         resp.session_id, parent_session_id, task, deliverable,
@@ -532,9 +559,10 @@ async def close_session(
             detail="Session not owned by you",
         )
     try:
-        with _grpc_channel() as ch:
-            stub = agent_pb2_grpc.AgentServiceStub(ch)
-            resp = stub.CloseSession(agent_pb2.CloseSessionRequest(session_id=session_id))
+        resp = await _grpc_unary(
+            "CloseSession",
+            agent_pb2.CloseSessionRequest(session_id=session_id),
+        )
     except grpc.RpcError as e:
         log.warning("gRPC CloseSession error for %s: %s (continuing to delete file)", session_id, e.details())
         resp = None
@@ -582,16 +610,17 @@ async def resume_session(
         )
 
     try:
-        with _grpc_channel() as ch:
-            stub = agent_pb2_grpc.AgentServiceStub(ch)
-            resp = stub.ResumeSession(agent_pb2.ResumeSessionRequest(
+        resp = await _grpc_unary(
+            "ResumeSession",
+            agent_pb2.ResumeSessionRequest(
                 session_id=session_id,
                 data_dir=_SESSION_DATA_DIR,
                 user_id=current_user["username"],
                 model=model,
                 system_prompts=system_prompts,
                 api_config=api_config,
-            ))
+            ),
+        )
     except grpc.RpcError as e:
         log.error("ResumeSession gRPC error for %s: code=%s detail=%s",
                   session_id, e.code(), e.details())
@@ -640,24 +669,18 @@ async def session_history(
                     text_parts = []
                     for b in blocks:
                         try:
+                            # Only surface user-visible text. thinking / tool_use /
+                            # tool_result are rendered separately at live time
+                            # (thinking → status bar, tool_* → side panel), so we
+                            # must drop them here too — otherwise switching away
+                            # and back would suddenly reveal previously hidden
+                            # blocks inside the chat bubbles.
                             if "text" in b:
                                 txt = b["text"]
                                 if isinstance(txt, dict):
                                     text_parts.append(txt.get("text", ""))
                                 elif isinstance(txt, str):
                                     text_parts.append(txt)
-                            elif "thinking" in b:
-                                thk = b["thinking"]
-                                if isinstance(thk, dict):
-                                    text_parts.append(thk.get("thinking", ""))
-                                elif isinstance(thk, str):
-                                    text_parts.append(thk)
-                            elif "tool_use" in b:
-                                tu = b["tool_use"]
-                                text_parts.append(f"[Tool: {tu.get('name', '')}] {tu.get('input', '')}")
-                            elif "tool_result" in b:
-                                tr = b["tool_result"]
-                                text_parts.append(f"[Result: {tr.get('tool_name', '')}] {tr.get('output', '')[:200]}")
                         except (KeyError, TypeError, AttributeError):
                             continue
                     content = "\n".join(text_parts)
@@ -679,9 +702,7 @@ async def session_history(
 @app.get("/api/health")
 async def health():
     try:
-        with _grpc_channel() as ch:
-            stub = agent_pb2_grpc.AgentServiceStub(ch)
-            resp = stub.HealthCheck(agent_pb2.HealthCheckRequest())
+        resp = await _grpc_unary("HealthCheck", agent_pb2.HealthCheckRequest())
         return {
             "status": "serving" if resp.status == 1 else "not_serving",
             "active_sessions": resp.active_sessions,
@@ -710,13 +731,12 @@ async def preview_skills(
     text = payload.get("text", "")
     top_k = int(payload.get("top_k", 8))
     try:
-        with _grpc_channel() as ch:
-            stub = agent_pb2_grpc.AgentServiceStub(ch)
-            resp = stub.PreviewSkills(
-                agent_pb2.PreviewSkillsRequest(
-                    session_id=session_id, text=text, top_k=top_k
-                )
-            )
+        resp = await _grpc_unary(
+            "PreviewSkills",
+            agent_pb2.PreviewSkillsRequest(
+                session_id=session_id, text=text, top_k=top_k
+            ),
+        )
         return {
             "matches": [
                 {
@@ -738,16 +758,16 @@ async def preview_skills(
 
 @app.get("/api/skills/mine")
 async def skills_mine(current_user: Dict[str, Any] = Depends(get_current_user)):
-    uid = str(current_user["id"])
+    uid = current_user["id"]
     is_admin = current_user.get("role") == "admin"
-    skills = db_skills.get_user_skills(uid, is_admin=is_admin)
-    active_ids = db_skills.get_user_active_ids(uid)
+    skills = await asyncio.to_thread(db_skills.get_user_skills, uid, is_admin=is_admin)
+    active_ids = await asyncio.to_thread(db_skills.get_user_active_ids, uid)
     return {"skills": skills, "active_ids": active_ids}
 
 
 @app.get("/api/skills/square")
 async def skills_square(search: str = "", category: str = ""):
-    return db_skills.get_square_skills(search, category)
+    return await asyncio.to_thread(db_skills.get_square_skills, search, category)
 
 
 @app.post("/api/skills")
@@ -755,8 +775,9 @@ async def skills_create(
     body: dict,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    skill_id = db_skills.create_skill(
-        user_id=str(current_user["id"]),
+    skill_id = await asyncio.to_thread(
+        db_skills.create_skill,
+        user_id=current_user["id"],
         name=body.get("name", ""),
         content=body.get("content", ""),
         description=body.get("description", ""),
@@ -778,7 +799,7 @@ async def skills_update(
     skill_id = body.get("skill_id", "")
     if not skill_id:
         raise HTTPException(status_code=400, detail="skill_id required")
-    ok = db_skills.update_skill(skill_id, str(current_user["id"]), body)
+    ok = await asyncio.to_thread(db_skills.update_skill, skill_id, current_user["id"], body)
     if not ok:
         raise HTTPException(status_code=404, detail="Skill not found")
     return {"ok": True}
@@ -792,7 +813,7 @@ async def skills_delete(
     skill_id = body.get("skill_id", "")
     if not skill_id:
         raise HTTPException(status_code=400, detail="skill_id required")
-    db_skills.delete_skill(skill_id)
+    await asyncio.to_thread(db_skills.delete_skill, skill_id)
     return {"ok": True}
 
 
@@ -804,7 +825,7 @@ async def skills_clone(
     skill_id = body.get("skill_id", "")
     if not skill_id:
         raise HTTPException(status_code=400, detail="skill_id required")
-    new_id = db_skills.clone_skill(skill_id, str(current_user["id"]))
+    new_id = await asyncio.to_thread(db_skills.clone_skill, skill_id, current_user["id"])
     if new_id is None:
         raise HTTPException(status_code=404, detail="Skill not found")
     return {"id": new_id}
@@ -818,7 +839,7 @@ async def skills_toggle_active(
     skill_id = body.get("skill_id", "")
     if not skill_id:
         raise HTTPException(status_code=400, detail="skill_id required")
-    is_active = db_skills.toggle_active(skill_id, str(current_user["id"]))
+    is_active = await asyncio.to_thread(db_skills.toggle_active, skill_id, current_user["id"])
     return {"is_active": is_active}
 
 
@@ -830,7 +851,7 @@ async def skills_publish(
     skill_id = body.get("skill_id", "")
     if not skill_id:
         raise HTTPException(status_code=400, detail="skill_id required")
-    is_published = db_skills.toggle_publish(skill_id, str(current_user["id"]))
+    is_published = await asyncio.to_thread(db_skills.toggle_publish, skill_id, current_user["id"])
     return {"is_published": is_published}
 
 
@@ -847,8 +868,9 @@ async def skills_upload(
     content = await file.read()
     text = content.decode("utf-8")
     name = getattr(file, "filename", "uploaded_skill.md") or "uploaded_skill.md"
-    skill_id = db_skills.create_skill(
-        user_id=str(current_user["id"]),
+    skill_id = await asyncio.to_thread(
+        db_skills.create_skill,
+        user_id=current_user["id"],
         name=name.replace(".md", "").replace(".yaml", "").replace(".yml", ""),
         content=text,
         description=f"Uploaded from {name}",
@@ -1015,8 +1037,10 @@ async def ws_chat(ws: WebSocket, session_id: str):
     await ws.accept()
     log.info("ws connected for session %s (user=%s)", session_id, user["username"])
 
-    ch = grpc.insecure_channel(GRPC_ADDR)
-    stub = agent_pb2_grpc.AgentServiceStub(ch)
+    # Use the shared process-wide stub. gRPC multiplexes streams over a single
+    # HTTP/2 channel, so many concurrent WS sessions share one connection — no
+    # per-WS handshake, no ephemeral-port churn at high QPS.
+    stub = _grpc_stub()
     input_iter = _ChatInputIterator()
 
     response_stream = stub.Chat(iter(input_iter))
@@ -1044,8 +1068,6 @@ async def ws_chat(ws: WebSocket, session_id: str):
     ws_send_queue: queue.Queue = queue.Queue()
     reader_thread = threading.Thread(target=read_grpc_responses, daemon=True)
     reader_thread.start()
-
-    import asyncio
 
     async def send_loop():
         loop = asyncio.get_event_loop()
@@ -1129,7 +1151,7 @@ async def ws_chat(ws: WebSocket, session_id: str):
             else:
                 await ws.send_json({"type": "error", "message": f"unknown message type: {msg_type}"})
     except WebSocketDisconnect:
-        log.info("ws disconnected for session %s", session_id)
+        log.info("ws disconnected (session preserved) for %s", session_id)
     except Exception as e:
         log.error("ws error for session %s: %s", session_id, e)
     finally:
@@ -1140,13 +1162,14 @@ async def ws_chat(ws: WebSocket, session_id: str):
             response_stream.cancel()
         except Exception:
             pass
-        try:
-            with _grpc_channel() as cleanup_ch:
-                cleanup_stub = agent_pb2_grpc.AgentServiceStub(cleanup_ch)
-                cleanup_stub.CloseSession(
-                    agent_pb2.CloseSessionRequest(session_id=session_id)
-                )
-            log.info("closed session %s (ws disconnect)", session_id)
-        except Exception as e:
-            log.warning("close_session on ws disconnect failed for %s: %s", session_id, e)
-        ch.close()
+        # Do NOT call CloseSession here. A WebSocket disconnect just means the
+        # operator's browser tab closed or switched away — the session must
+        # outlive that, otherwise an in-flight proxy turn (which can sit
+        # waiting up to 30 min for the operator to paste the result back) gets
+        # cancelled the moment they peek at another conversation. Sessions are
+        # explicitly closed via DELETE /api/sessions/{id}, on user logout, or
+        # at kernel shutdown.
+        #
+        # NOTE: we no longer call `ch.close()` — the gRPC channel is process-
+        # wide (see `_grpc_stub`) and shared by every other WS connection plus
+        # every unary RPC. Closing it here would tear down all of them.

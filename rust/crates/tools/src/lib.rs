@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use api::{
     max_tokens_for_model, model_family_identity_for, resolve_model_alias, ApiError,
     ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
@@ -3737,8 +3738,17 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
 
 fn run_agent_job(job: &AgentJob) -> Result<(), String> {
     let mut runtime = build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
-    let summary = runtime
-        .run_turn(job.prompt.clone(), None)
+    // The runtime is async since Plan ② (B2). Sub-agent jobs are spawned from
+    // a fresh OS thread (see `spawn_agent_job` above), so we own this thread
+    // and can build a private current-thread tokio runtime to drive the
+    // async `run_turn`. A multi-thread runtime would be overkill — every
+    // upstream `await` is I/O-bound on a single provider stream.
+    let tokio_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let summary = tokio_rt
+        .block_on(runtime.run_turn(job.prompt.clone(), None))
         .map_err(|error| error.to_string())?;
     let final_text = final_assistant_text(&summary);
     persist_agent_terminal_state(&job.manifest, "completed", Some(final_text.as_str()), None)
@@ -4658,7 +4668,6 @@ struct ProviderEntry {
 }
 
 struct ProviderRuntimeClient {
-    runtime: tokio::runtime::Runtime,
     chain: Vec<ProviderEntry>,
     allowed_tools: BTreeSet<String>,
 }
@@ -4690,7 +4699,6 @@ impl ProviderRuntimeClient {
             }
         }
         Ok(Self {
-            runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
             chain,
             allowed_tools,
         })
@@ -4715,8 +4723,12 @@ fn load_provider_fallback_config() -> ProviderFallbackConfig {
         })
 }
 
+#[async_trait]
 impl ApiClient for ProviderRuntimeClient {
-    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    async fn stream(
+        &mut self,
+        request: ApiRequest,
+    ) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
             .into_iter()
             .map(|spec| ToolDefinition {
@@ -4730,7 +4742,6 @@ impl ApiClient for ProviderRuntimeClient {
             (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
         let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
 
-        let runtime = &self.runtime;
         let chain = &self.chain;
         let mut last_error: Option<ApiError> = None;
         for (index, entry) in chain.iter().enumerate() {
@@ -4745,7 +4756,7 @@ impl ApiClient for ProviderRuntimeClient {
                 ..Default::default()
             };
 
-            let attempt = runtime.block_on(stream_with_provider(&entry.client, &message_request));
+            let attempt = stream_with_provider(&entry.client, &message_request).await;
             match attempt {
                 Ok(events) => return Ok(events),
                 Err(error) if error.is_retryable() && index + 1 < chain.len() => {
@@ -4894,8 +4905,9 @@ impl SubagentToolExecutor {
     }
 }
 
+#[async_trait]
 impl ToolExecutor for SubagentToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         if !self.allowed_tools.contains(tool_name) {
             return Err(ToolError::new(format!(
                 "tool `{tool_name}` is not enabled for this sub-agent"

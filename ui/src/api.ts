@@ -1,8 +1,21 @@
 const TOKEN_KEY = 'db_clinic_token';
+const LEGACY_TOKEN_KEY = 'jwt_token';
 
 function getToken(): string | null {
   try {
-    return localStorage.getItem(TOKEN_KEY);
+    const current = localStorage.getItem(TOKEN_KEY);
+    if (current) return current;
+    // One-time migration from the pre-SPA HTML/JS bundles that stored the
+    // JWT under 'jwt_token'. We adopt the legacy value rather than silently
+    // logging the user out, then delete the old key so this branch only runs
+    // until the next page load.
+    const legacy = localStorage.getItem(LEGACY_TOKEN_KEY);
+    if (legacy) {
+      localStorage.setItem(TOKEN_KEY, legacy);
+      localStorage.removeItem(LEGACY_TOKEN_KEY);
+      return legacy;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -14,10 +27,22 @@ export function setToken(token: string | null) {
   } else {
     localStorage.removeItem(TOKEN_KEY);
   }
+  // Always clear the legacy key on any explicit set/clear so logging out can
+  // never leave a stale jwt_token behind for getToken() to resurrect.
+  try {
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+  } catch {
+    /* ignore storage errors */
+  }
 }
 
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+  try {
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+  } catch {
+    /* ignore storage errors */
+  }
 }
 
 export async function api<T = unknown>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {

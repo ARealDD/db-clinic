@@ -1,6 +1,20 @@
 # Unified runtime configuration for db-clinic.
 # Both the Rust gRPC server and the Python FastAPI gateway read this file.
 
+[storage]
+# Root directory for persisted gateway state (SQLite DB + per-session JSONL
+# transcripts). Resolved relative to the repo root if not absolute; created on
+# startup if missing.
+data_dir = "data"
+
+# SQLite metadatabase file. Lives directly under `data_dir`.
+db_file = "metadatabase.db"
+
+# Subdirectory of `data_dir` where per-user session JSONLs are written
+# (one file per session, keyed by `{username}/{session_id}.jsonl`). The Rust
+# kernel receives the parent `data_dir` over gRPC and appends this subdir.
+sessions_subdir = "sessions"
+
 [logging]
 # Directory where rolling log files are written. Resolved relative to the
 # repo root if not absolute. Created on startup if missing.

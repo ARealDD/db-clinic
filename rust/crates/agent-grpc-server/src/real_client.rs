@@ -6,15 +6,24 @@ use api::{
     MessageRequest, OpenAiCompatClient, OpenAiCompatConfig, OutputContentBlock, ProviderClient,
     StreamEvent, ToolDefinition, ToolResultContentBlock,
 };
+use async_trait::async_trait;
 use runtime::{
     ApiClient, ApiFailure, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage,
     MessageRole, RuntimeError,
 };
 
-pub type EventSink = Arc<Mutex<Option<std::sync::mpsc::Sender<AssistantEvent>>>>;
+/// Where the runtime publishes assistant events while a turn is in progress.
+///
+/// The outer `Mutex` lets the per-session worker swap the sink in/out around
+/// each turn (a fresh tokio mpsc::Sender is wired in before `run_turn` and
+/// cleared after). The inner `Option<Sender>` decouples that swap from the
+/// real_client borrow — when the sink is `None`, events are silently dropped,
+/// which is the correct behaviour outside an active turn (e.g. between turns,
+/// or after a panic). Using tokio's mpsc instead of the std one removes the
+/// sync-to-async bridge that used to live in `service.rs::stream_forwarder`.
+pub type EventSink = Arc<Mutex<Option<tokio::sync::mpsc::Sender<AssistantEvent>>>>;
 
 pub struct RealApiClient {
-    runtime: tokio::runtime::Runtime,
     client: ProviderClient,
     model: String,
     provider: String,
@@ -65,12 +74,10 @@ impl RealApiClient {
             }
             _ => return Err(format!("unknown provider: {provider}")),
         };
-        let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
         let event_sink: EventSink = Arc::new(Mutex::new(None));
         let sink_clone = event_sink.clone();
         Ok((
             Self {
-                runtime: rt,
                 client,
                 model: model.to_string(),
                 provider: provider.to_string(),
@@ -111,13 +118,18 @@ fn api_error_into_runtime(err: &ApiError, provider: &str) -> RuntimeError {
 }
 
 fn emit(sink: &EventSink, event: &AssistantEvent) {
+    // Tokio mpsc has no `try_send`-without-allocation equivalent that's both
+    // sync-callable and non-fallible — `try_send` itself is what we want.
+    // Failures (subscriber dropped or queue full) are intentionally silenced;
+    // a slow/dead UI must never block the model loop.
     if let Ok(guard) = sink.lock() {
         if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(event.clone());
+            let _ = tx.try_send(event.clone());
         }
     }
 }
 
+#[async_trait]
 impl ApiClient for RealApiClient {
     fn model(&self) -> &str {
         &self.model
@@ -127,7 +139,10 @@ impl ApiClient for RealApiClient {
         &self.provider
     }
 
-    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    async fn stream(
+        &mut self,
+        request: ApiRequest,
+    ) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let messages = convert_messages(&request.messages);
         let system =
             (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
@@ -145,12 +160,35 @@ impl ApiClient for RealApiClient {
             ..Default::default()
         };
 
-        self.runtime.block_on(stream_and_collect(
+        tracing::debug!(
+            provider = %self.provider,
+            model = %self.model,
+            message_count = message_request.messages.len(),
+            "RealApiClient::stream dispatching"
+        );
+
+        let result = stream_and_collect(
             &self.client,
             &message_request,
             &self.event_sink,
             &self.provider,
-        ))
+        )
+        .await;
+
+        match &result {
+            Ok(events) => tracing::debug!(
+                provider = %self.provider,
+                event_count = events.len(),
+                "RealApiClient::stream completed"
+            ),
+            Err(err) => tracing::warn!(
+                provider = %self.provider,
+                error = %err,
+                "RealApiClient::stream failed"
+            ),
+        }
+
+        result
     }
 }
 

@@ -13,8 +13,8 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 // Re-exports from the `api` crate — submodules are private; use crate-root re-exports.
@@ -77,24 +77,19 @@ struct ToolCallInfo {
 struct EvalApiClient {
     client: ProviderClient,
     model: String,
-    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl EvalApiClient {
     fn from_env(model: String) -> Result<Self, String> {
         let client =
             ProviderClient::from_model_with_anthropic_auth(&model, None).map_err(|e| e.to_string())?;
-        let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-        Ok(Self {
-            client,
-            model,
-            runtime: Arc::new(runtime),
-        })
+        Ok(Self { client, model })
     }
 }
 
+#[async_trait]
 impl ApiClient for EvalApiClient {
-    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    async fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens: api::max_tokens_for_model(&self.model),
@@ -104,7 +99,7 @@ impl ApiClient for EvalApiClient {
             ..Default::default()
         };
 
-        self.runtime.block_on(consume_stream(&self.client, &message_request))
+        consume_stream(&self.client, &message_request).await
     }
 }
 
@@ -194,8 +189,9 @@ async fn consume_stream(
 
 struct EvalToolExecutor;
 
+#[async_trait]
 impl ToolExecutor for EvalToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         Ok(format!(
             "[eval mode] tool `{tool_name}` not executed (input: {input})"
         ))
@@ -316,7 +312,8 @@ fn build_response(
 // Main loop
 // ---------------------------------------------------------------------------
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let model = std::env::var("DB_CLINIC_MODEL")
         .or_else(|_| std::env::var("ANTHROPIC_MODEL"))
         .unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
@@ -407,7 +404,7 @@ fn main() {
             }
         });
 
-        let result = entry.runtime.run_turn(message, None);
+        let result = entry.runtime.run_turn(message, None).await;
         let resp = build_response(&entry.display_id, result);
 
         writeln!(writer, "{}", serde_json::to_string(&resp).unwrap()).ok();

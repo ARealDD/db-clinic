@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 api = { path = "../api" }
+async-trait.workspace = true
+futures-util.workspace = true
 prost = "0.13"
 regex = "1"
 runtime = { path = "../runtime" }
@@ -22,6 +24,7 @@ toml.workspace = true
 tools = { path = "../tools" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-stream = "0.1"
+tokio-util.workspace = true
 tonic = "0.12"
 tracing.workspace = true
 tracing-appender.workspace = true

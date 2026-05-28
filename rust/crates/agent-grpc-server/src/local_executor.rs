@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use runtime::{ToolError, ToolExecutor};
 use serde_json::Value;
 use tools::GlobalToolRegistry;
@@ -26,8 +27,9 @@ impl Default for LocalToolExecutor {
     }
 }
 
+#[async_trait]
 impl ToolExecutor for LocalToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         let value: Value = if input.trim().is_empty() {
             Value::Object(serde_json::Map::new())
         } else {

@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use runtime::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, TokenUsage};
 
 pub struct MockApiClient {
@@ -10,8 +11,12 @@ impl MockApiClient {
     }
 }
 
+#[async_trait]
 impl ApiClient for MockApiClient {
-    fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    async fn stream(
+        &mut self,
+        _request: ApiRequest,
+    ) -> Result<Vec<AssistantEvent>, RuntimeError> {
         self.call_count += 1;
         Ok(vec![
             AssistantEvent::TextDelta(format!(

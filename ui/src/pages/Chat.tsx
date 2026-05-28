@@ -60,7 +60,8 @@ type Action =
   | { type: 'set_input_enabled' }
   | { type: 'set_messages'; messages: ChatState['messages'] }
   | { type: 'clear_chat' }
-  | { type: 'expire_all_proxy_instructions' };
+  | { type: 'expire_all_proxy_instructions' }
+  | { type: 'restore_state'; state: ChatState };
 
 let msgCounter = 0;
 const newId = () => `msg-${++msgCounter}`;
@@ -100,8 +101,25 @@ function chatReducer(state: ChatState, action: Action): ChatState {
         skillCount: action.skills.length,
       };
 
-    case 'tool_execution':
+    case 'tool_execution': {
+      const idx = state.toolEntries.findIndex((e) => e.toolUseId === action.payload.toolUseId);
+      if (idx >= 0) {
+        // Upgrade an existing entry (e.g. started → completed/failed) instead
+        // of duplicating it. The live ToolUse event arrives first as
+        // status="started" with empty output; the post-turn finished event
+        // overwrites with the real status + output.
+        const next = [...state.toolEntries];
+        next[idx] = {
+          ...next[idx],
+          status: action.payload.status,
+          output: action.payload.output || next[idx].output,
+          isError: action.payload.isError,
+          toolName: action.payload.toolName || next[idx].toolName,
+        };
+        return { ...state, toolEntries: next };
+      }
       return { ...state, toolEntries: [...state.toolEntries, action.payload] };
+    }
 
     case 'proxy_instruction': {
       const existingIdx = state.proxyInstructions.findIndex(
@@ -159,6 +177,9 @@ function chatReducer(state: ChatState, action: Action): ChatState {
     case 'set_messages':
       return { ...state, messages: action.messages };
 
+    case 'restore_state':
+      return action.state;
+
     case 'clear_chat':
       return {
         ...state,
@@ -214,6 +235,22 @@ export default function Chat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const loadingRef = useRef(false);
+  // Per-session ChatState snapshots, keyed by session_id. We restore from here
+  // on switch-back so an in-flight turn (especially a pending proxy card) keeps
+  // its UI alive — the kernel-side resume is a no-op for live sessions
+  // (session_store.rs), so the React-side cache is the source of truth until
+  // the next turn checkpoints to disk.
+  const sessionStatesRef = useRef<Map<string, ChatState>>(new Map());
+  const stateRef = useRef<ChatState>(state);
+  const sessionIdRef = useRef<string | null>(sessionId);
+  useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+  // Keep the per-session snapshot in lock-step with current state so the
+  // restore-on-switch path always has the latest data. Skip persisting the
+  // *initial* empty state for sessions we haven't actually opened yet.
+  useEffect(() => {
+    if (sessionId) sessionStatesRef.current.set(sessionId, state);
+  }, [state, sessionId]);
 
   const ws = useWebSocket(sessionId);
 
@@ -288,6 +325,28 @@ export default function Chat() {
 
   const resumeSession = async (sid: string, sessionList: Session[]) => {
     setStatus('resuming');
+    // Prefer the in-memory snapshot. The kernel's /resume is idempotent for
+    // live sessions, so we don't need to refetch history if we already have
+    // the latest state in hand. This is what preserves an active proxy card
+    // (and any partial assistant text / tool entries) across a session switch.
+    const cached = sessionStatesRef.current.get(sid);
+    if (cached) {
+      try {
+        await api(`/api/sessions/${sid}/resume`, { method: 'POST' });
+      } catch (e) {
+        // Kernel lost the session (e.g. restarted): fall through to history
+        // reload below.
+        console.warn('resume failed, falling back to history reload:', e);
+        sessionStatesRef.current.delete(sid);
+      }
+      if (sessionStatesRef.current.has(sid)) {
+        dispatch({ type: 'restore_state', state: cached });
+        setSessionId(sid);
+        setSessions(sessionList);
+        return;
+      }
+    }
+
     dispatch({ type: 'clear_chat' });
     try {
       await api(`/api/sessions/${sid}/resume`, { method: 'POST' });
@@ -340,6 +399,7 @@ export default function Chat() {
   const handleDeleteSession = async (sid: string) => {
     try {
       await api(`/api/sessions/${sid}`, { method: 'DELETE' });
+      sessionStatesRef.current.delete(sid);
       const updated = sessions.filter((s) => s.session_id !== sid);
       setSessions(updated);
       if (sid === sessionId) {

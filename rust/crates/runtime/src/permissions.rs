@@ -83,7 +83,12 @@ pub enum PermissionPromptDecision {
 }
 
 /// Prompting interface used when policy requires interactive approval.
-pub trait PermissionPrompter {
+///
+/// `Send` is required because the runtime is now driven async (Plan ② B2):
+/// `ConversationRuntime::run_turn` is an async fn that holds an
+/// `Option<&mut dyn PermissionPrompter>` across `.await` points. Without the
+/// `Send` bound the resulting future cannot be `tokio::spawn`-ed.
+pub trait PermissionPrompter: Send {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision;
 }
 
