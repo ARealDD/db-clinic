@@ -2192,14 +2192,26 @@ mod tests {
         let request = MessageRequest {
             model: "gpt-4o".to_string(),
             max_tokens: 100,
-            messages: vec![InputMessage {
-                role: "assistant".to_string(),
-                content: vec![InputContentBlock::ToolUse {
-                    id: "call_1".to_string(),
-                    name: "read_file".to_string(),
-                    input: serde_json::json!({"path": "/tmp/test"}),
-                }],
-            }],
+            messages: vec![
+                InputMessage {
+                    role: "assistant".to_string(),
+                    content: vec![InputContentBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: serde_json::json!({"path": "/tmp/test"}),
+                    }],
+                },
+                InputMessage {
+                    role: "tool".to_string(),
+                    content: vec![InputContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: vec![ToolResultContentBlock::Text {
+                            text: "file content".to_string(),
+                        }],
+                        is_error: false,
+                    }],
+                },
+            ],
             stream: false,
             ..Default::default()
         };

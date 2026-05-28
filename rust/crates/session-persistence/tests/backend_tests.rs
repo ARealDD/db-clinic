@@ -1,10 +1,7 @@
 use session_persistence::{
-    Checkpoint, CompactionRecord, MemoryBackend, MessageRecord, PersistenceError,
+    Checkpoint, CompactionRecord, MemoryBackend, MessageRecord,
     PromptHistoryRecord, SessionBackend, SessionRecord,
 };
-
-use std::path::PathBuf;
-use std::sync::Arc;
 
 fn create_test_record(id: &str) -> SessionRecord {
     SessionRecord {
@@ -15,6 +12,7 @@ fn create_test_record(id: &str) -> SessionRecord {
         workspace_root: None,
         fork_parent_id: None,
         fork_branch_name: None,
+        username: None,
     }
 }
 
@@ -53,6 +51,7 @@ fn test_backend_trait_consistency<B: SessionBackend>(backend: &B) {
     assert_eq!(loaded.created_at_ms, 1000);
 
     let sessions = backend.list_sessions().unwrap();
+    eprintln!("DEBUG list_sessions: count={}, ids={:?}", sessions.len(), sessions.iter().map(|s| &s.session_id).collect::<Vec<_>>());
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].session_id, sid);
 
