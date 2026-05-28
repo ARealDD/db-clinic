@@ -28,6 +28,10 @@ service AgentService {
   // UI to render a picker BEFORE sending the actual user_message — selected
   // skill ids are then carried back via UserMessage.context attachments.
   rpc PreviewSkills(PreviewSkillsRequest) returns (PreviewSkillsResponse);
+
+  // Resume a previously persisted session from its JSONL file.
+  // Loads conversation history so the agent can continue where it left off.
+  rpc ResumeSession(ResumeSessionRequest) returns (ResumeSessionResponse);
 }
 
 // ============================================================================
@@ -47,6 +51,14 @@ message CreateSessionRequest {
   // LLM API credentials and endpoint configuration.
   // When absent, the server falls back to mock mode.
   ApiConfig api_config = 4;
+
+  // Directory for persisting session state to JSONL files.
+  // When absent, the session lives only in memory (ephemeral).
+  string data_dir = 5;
+
+  // Username for per-user session file isolation.
+  // When present, session files are stored under <data_dir>/sessions/<user_id>/.
+  string user_id = 6;
 }
 
 message ApiConfig {
@@ -89,6 +101,36 @@ message CreateSessionResponse {
   string session_id = 1;
   // Timestamp (ms since epoch) when the session was created.
   uint64 created_at_ms = 2;
+}
+
+message ResumeSessionRequest {
+  // The session_id to resume (must match the file name on disk).
+  string session_id = 1;
+
+  // Directory where the JSONL file is stored (same as CreateSessionRequest.data_dir).
+  string data_dir = 2;
+
+  // LLM model identifier for the resumed session.
+  string model = 3;
+
+  // System prompt segments for the resumed session.
+  repeated string system_prompts = 4;
+
+  // LLM API credentials (same as CreateSessionRequest).
+  ApiConfig api_config = 5;
+
+  // Session-level configuration overrides.
+  SessionConfig config = 6;
+
+  // Username for per-user session file isolation.
+  string user_id = 7;
+}
+
+message ResumeSessionResponse {
+  string session_id = 1;
+  uint64 created_at_ms = 2;
+  // Number of conversation messages loaded from the JSONL file.
+  uint32 loaded_messages = 3;
 }
 
 message CloseSessionRequest {

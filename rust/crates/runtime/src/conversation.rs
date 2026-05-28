@@ -58,6 +58,42 @@ pub struct PromptCacheEvent {
 /// Minimal streaming API contract required by [`ConversationRuntime`].
 pub trait ApiClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
+
+    /// Model identifier surfaced for observability (prompt logs, tracing).
+    /// Default `""` keeps existing implementors compiling; concrete clients
+    /// override to expose their configured model name. The return type is
+    /// `&str` (not `&'static str`) because real implementors borrow from
+    /// `&self`, not from static storage.
+    #[allow(clippy::unnecessary_literal_bound)]
+    fn model(&self) -> &str {
+        ""
+    }
+
+    /// Provider identifier (e.g. `"openai"`, `"anthropic"`, `"mock"`). Same
+    /// rationale as [`Self::model`].
+    #[allow(clippy::unnecessary_literal_bound)]
+    fn provider(&self) -> &str {
+        ""
+    }
+}
+
+/// Observer invoked by [`ConversationRuntime`] right before each upstream
+/// `ApiClient::stream` call. Used by the gRPC server to emit a JSONL row that
+/// captures the *true* prompt the model sees (post system-prompt merge,
+/// post skill-context augmentation). Kept as a trait so the runtime crate
+/// does not have to depend on the grpc-server crate.
+///
+/// All callbacks are best-effort: failures inside an observer must not bubble
+/// up into the conversation loop.
+pub trait TurnObserver: Send + Sync {
+    fn before_stream(
+        &self,
+        request: &ApiRequest,
+        model: &str,
+        provider: &str,
+        session_id: &str,
+        turn_iteration: usize,
+    );
 }
 
 /// Trait implemented by tool dispatchers that execute model-requested tools.
@@ -128,6 +164,10 @@ pub struct ConversationRuntime<C, T> {
     /// call as a normal tool failure and keeps looping into more LLM calls
     /// until `max_iterations`.
     cancel_signal: Option<Arc<AtomicBool>>,
+    /// Optional pre-stream observer; see [`TurnObserver`]. Wrapped in `Arc`
+    /// so observer state can be shared between many runtimes (the gRPC
+    /// server keeps one logger handle for the whole process).
+    turn_observer: Option<Arc<dyn TurnObserver>>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -178,6 +218,7 @@ where
             hook_progress_reporter: None,
             session_tracer: None,
             cancel_signal: None,
+            turn_observer: None,
         }
     }
 
@@ -220,6 +261,14 @@ where
     #[must_use]
     pub fn with_cancel_signal(mut self, signal: Arc<AtomicBool>) -> Self {
         self.cancel_signal = Some(signal);
+        self
+    }
+
+    /// Attach a [`TurnObserver`] invoked immediately before each upstream
+    /// `ApiClient::stream` call. See the trait docs for the contract.
+    #[must_use]
+    pub fn with_turn_observer(mut self, observer: Arc<dyn TurnObserver>) -> Self {
+        self.turn_observer = Some(observer);
         self
     }
 
@@ -361,6 +410,15 @@ where
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
             };
+            if let Some(observer) = self.turn_observer.as_ref() {
+                observer.before_stream(
+                    &request,
+                    self.api_client.model(),
+                    self.api_client.provider(),
+                    &self.session.session_id,
+                    iterations,
+                );
+            }
             let events = match self.api_client.stream(request) {
                 Ok(events) => events,
                 Err(error) => {

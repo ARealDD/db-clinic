@@ -86,16 +86,20 @@ SERVICE_STATUS_SERVING: ServiceStatus
 SERVICE_STATUS_NOT_SERVING: ServiceStatus
 
 class CreateSessionRequest(_message.Message):
-    __slots__ = ("model", "system_prompts", "config", "api_config")
+    __slots__ = ("model", "system_prompts", "config", "api_config", "data_dir", "user_id")
     MODEL_FIELD_NUMBER: _ClassVar[int]
     SYSTEM_PROMPTS_FIELD_NUMBER: _ClassVar[int]
     CONFIG_FIELD_NUMBER: _ClassVar[int]
     API_CONFIG_FIELD_NUMBER: _ClassVar[int]
+    DATA_DIR_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
     model: str
     system_prompts: _containers.RepeatedScalarFieldContainer[str]
     config: SessionConfig
     api_config: ApiConfig
-    def __init__(self, model: _Optional[str] = ..., system_prompts: _Optional[_Iterable[str]] = ..., config: _Optional[_Union[SessionConfig, _Mapping]] = ..., api_config: _Optional[_Union[ApiConfig, _Mapping]] = ...) -> None: ...
+    data_dir: str
+    user_id: str
+    def __init__(self, model: _Optional[str] = ..., system_prompts: _Optional[_Iterable[str]] = ..., config: _Optional[_Union[SessionConfig, _Mapping]] = ..., api_config: _Optional[_Union[ApiConfig, _Mapping]] = ..., data_dir: _Optional[str] = ..., user_id: _Optional[str] = ...) -> None: ...
 
 class ApiConfig(_message.Message):
     __slots__ = ("provider", "api_key", "base_url")
@@ -128,6 +132,34 @@ class CreateSessionResponse(_message.Message):
     session_id: str
     created_at_ms: int
     def __init__(self, session_id: _Optional[str] = ..., created_at_ms: _Optional[int] = ...) -> None: ...
+
+class ResumeSessionRequest(_message.Message):
+    __slots__ = ("session_id", "data_dir", "model", "system_prompts", "api_config", "config", "user_id")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    DATA_DIR_FIELD_NUMBER: _ClassVar[int]
+    MODEL_FIELD_NUMBER: _ClassVar[int]
+    SYSTEM_PROMPTS_FIELD_NUMBER: _ClassVar[int]
+    API_CONFIG_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    data_dir: str
+    model: str
+    system_prompts: _containers.RepeatedScalarFieldContainer[str]
+    api_config: ApiConfig
+    config: SessionConfig
+    user_id: str
+    def __init__(self, session_id: _Optional[str] = ..., data_dir: _Optional[str] = ..., model: _Optional[str] = ..., system_prompts: _Optional[_Iterable[str]] = ..., api_config: _Optional[_Union[ApiConfig, _Mapping]] = ..., config: _Optional[_Union[SessionConfig, _Mapping]] = ..., user_id: _Optional[str] = ...) -> None: ...
+
+class ResumeSessionResponse(_message.Message):
+    __slots__ = ("session_id", "created_at_ms", "loaded_messages")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_MS_FIELD_NUMBER: _ClassVar[int]
+    LOADED_MESSAGES_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    created_at_ms: int
+    loaded_messages: int
+    def __init__(self, session_id: _Optional[str] = ..., created_at_ms: _Optional[int] = ..., loaded_messages: _Optional[int] = ...) -> None: ...
 
 class CloseSessionRequest(_message.Message):
     __slots__ = ("session_id",)

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sys, os, json, queue, threading, logging, logging.handlers
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "generated"))
@@ -14,19 +15,15 @@ import grpc
 import agent_pb2
 import agent_pb2_grpc
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
-from python.db.manager import DatabaseManager
-from python.db.skill_service import SkillService
-from python.db.user_service import UserService
-from python.db.admin_service import AdminService
-
-import metadb
+import db
 from models import UserRegister, UserLogin, TokenResponse, UserResponse, LLMConfig
+from tool_usage_guidance import TOOL_USAGE_GUIDANCE
 
 import auth as auth_mod
 
@@ -38,7 +35,13 @@ except ImportError:  # pragma: no cover - fallback for older interpreters
     except ImportError:
         tomllib = None  # type: ignore[assignment]
 
-_DEFAULT_LOG_CFG = {"dir": "logs", "gateway_prefix": "gateway", "retention_days": 14}
+_DEFAULT_LOG_CFG = {
+    "dir": "logs",
+    "gateway_prefix": "gateway",
+    "retention_days": 14,
+    "prompt_log_dir": "logs/prompts",
+    "prompt_log_prefix_gateway": "prompt-gateway",
+}
 
 
 def _load_log_cfg() -> Dict[str, Any]:
@@ -65,8 +68,6 @@ _log_dir.mkdir(parents=True, exist_ok=True)
 _fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
 _root = logging.getLogger()
 _root.setLevel(logging.INFO)
-# uvicorn may have already attached a handler when running under --reload;
-# clear so we don't double-emit when we install our own pair below.
 for _h in list(_root.handlers):
     _root.removeHandler(_h)
 
@@ -91,32 +92,42 @@ log.info(
     _log_cfg["retention_days"],
 )
 
+_prompt_log_dir = Path(_log_cfg["prompt_log_dir"])
+if not _prompt_log_dir.is_absolute():
+    _prompt_log_dir = Path(_PROJECT_ROOT) / _prompt_log_dir
+_prompt_log_dir.mkdir(parents=True, exist_ok=True)
+
+prompt_log = logging.getLogger("gateway.prompt")
+prompt_log.setLevel(logging.INFO)
+prompt_log.propagate = False
+for _h in list(prompt_log.handlers):
+    prompt_log.removeHandler(_h)
+_prompt_file_handler = logging.handlers.TimedRotatingFileHandler(
+    filename=str(_prompt_log_dir / f"{_log_cfg['prompt_log_prefix_gateway']}.log"),
+    when="midnight",
+    backupCount=int(_log_cfg["retention_days"]),
+    encoding="utf-8",
+)
+_prompt_file_handler.setFormatter(logging.Formatter("%(message)s"))
+prompt_log.addHandler(_prompt_file_handler)
+log.info(
+    "prompt logging initialised dir=%s prefix=%s",
+    _prompt_log_dir,
+    _log_cfg["prompt_log_prefix_gateway"],
+)
+
 GRPC_ADDR = os.environ.get("GRPC_ADDR", "localhost:50051")
 
 app = FastAPI(title="Agent Gateway")
 
-# ---------- Static file serving (SPA-friendly) ----------
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-
-
-@app.get("/static/{path:path}")
-async def serve_static_or_spa(path: str):
-    file_path = os.path.join(STATIC_DIR, path)
-    if os.path.isfile(file_path):
-        return FileResponse(file_path)
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
-
-
-# ---------- Global exception handler ----------
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception):
     log.exception("unhandled exception on %s %s", request.method, request.url.path)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
-
-# ---------- No-cache middleware ----------
 
 @app.middleware("http")
 async def _no_cache_html(request: Request, call_next):
@@ -129,46 +140,29 @@ async def _no_cache_html(request: Request, call_next):
     return response
 
 
-# ---------- Database ----------
-
-db = DatabaseManager()
-user_service = UserService(db)
-skill_service = SkillService(db)
-admin_service = AdminService(db, skill_service)
-
-
 @app.on_event("startup")
 async def _startup_init_db():
-    # uvicorn installs its own handlers on these loggers with propagate=False,
-    # so without rerouting they would never reach our file handler. Strip the
-    # uvicorn handlers and let the records bubble up to root so both sinks
-    # (console + file) receive them exactly once.
     for _name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         _lg = logging.getLogger(_name)
         _lg.handlers.clear()
         _lg.propagate = True
-    await metadb.init_db()
-    await db.initialize()
-    count = await db.seed_official_skills()
-    log.info("db initialized; seeded %d official skills", count)
+    await db.init_db()
 
     # Bootstrap admin user from environment variables
     admin_username = os.environ.get("ADMIN_USERNAME", "").strip()
     admin_password = os.environ.get("ADMIN_PASSWORD", "").strip()
     if admin_username and admin_password:
         hashed = auth_mod.hash_password(admin_password)
-        user_id = await metadb.create_user(admin_username, hashed)
+        user_id = await db.create_user(admin_username, hashed)
         if user_id is not None:
-            await metadb.set_user_role(user_id, "admin")
-            await user_service.ensure_user(str(user_id), admin_username)
+            await db.set_user_role(user_id, "admin")
             log.info("bootstrapped admin user: %s (id=%s)", admin_username, user_id)
         else:
-            # User already exists — ensure correct password and admin role
-            existing = await metadb.get_user_by_username(admin_username)
+            existing = await db.get_user_by_username(admin_username)
             if existing:
-                await metadb.update_user_password(existing["id"], hashed)
+                await db.update_user_password(existing["id"], hashed)
                 if existing.get("role") != "admin":
-                    await metadb.set_user_role(existing["id"], "admin")
+                    await db.set_user_role(existing["id"], "admin")
                 log.info("updated existing user to admin: %s (id=%s)", admin_username, existing["id"])
 
 
@@ -180,7 +174,6 @@ _bearer_scheme = HTTPBearer()
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
 ) -> Dict[str, Any]:
-    """FastAPI dependency that extracts and validates the JWT bearer token."""
     payload = auth_mod.decode_access_token(credentials.credentials)
     if payload is None:
         raise HTTPException(
@@ -193,13 +186,25 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token missing subject",
         )
-    user = await metadb.get_user_by_id(int(user_id))
+    user = await db.get_user_by_id(int(user_id))
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
         )
     return user
+
+
+async def require_admin(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+    log.info("admin action by user %s (id=%s)", current_user["username"], current_user["id"])
+    return current_user
 
 
 def _grpc_channel():
@@ -210,20 +215,20 @@ def _grpc_channel():
 
 @app.post("/api/auth/register", response_model=TokenResponse)
 async def register(body: UserRegister):
-    existing = await metadb.get_user_by_username(body.username)
+    existing = await db.get_user_by_username(body.username)
     if existing is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Username already exists",
         )
     hashed = auth_mod.hash_password(body.password)
-    user_id = await metadb.create_user(body.username, hashed)
+    user_id = await db.create_user(body.username, hashed)
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create user",
         )
-    created = await metadb.get_user_by_id(user_id)
+    created = await db.get_user_by_id(user_id)
     role = created["role"] if created else "user"
     token = auth_mod.create_access_token({"sub": str(user_id), "role": role})
     log.info("registered user %s (id=%s)", body.username, user_id)
@@ -232,29 +237,12 @@ async def register(body: UserRegister):
 
 @app.post("/api/auth/login", response_model=TokenResponse)
 async def login(body: UserLogin):
-    """Login with username+password (JWT) OR username-only (internal)."""
-    user = await metadb.get_user_by_username(body.username)
-    if user is None:
-        # Auto-create user with a random password hash
-        hashed = auth_mod.hash_password(os.urandom(16).hex())
-        user_id = await metadb.create_user(body.username, hashed)
-        if user_id is None:
-            raise HTTPException(status_code=500, detail="Failed to create user")
-        # Fetch newly created user to get default role
-        created = await metadb.get_user_by_id(user_id)
-        role = created["role"] if created else "user"
-        token = auth_mod.create_access_token({"sub": str(user_id), "role": role})
-        log.info("auto-created + logged in user %s (id=%s)", body.username, user_id)
-        return TokenResponse(access_token=token)
-
-    if body.password:
-        # Standard JWT login with password verification
-        if not auth_mod.verify_password(body.password, user["hashed_pw"]):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect username or password",
-            )
-    # If no password provided, skip verification (username-only mode)
+    user = await db.get_user_by_username(body.username)
+    if user is None or not auth_mod.verify_password(body.password, user["hashed_pw"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+        )
     token = auth_mod.create_access_token({"sub": str(user["id"]), "role": user.get("role", "user")})
     log.info("logged in user %s (id=%s)", user["username"], user["id"])
     return TokenResponse(access_token=token)
@@ -269,27 +257,69 @@ async def me(current_user: Dict[str, Any] = Depends(get_current_user)):
     )
 
 
-# ---------- Per-user LLM config (metadb) ----------
+# ---------- Per-user LLM config ----------
 
 async def _get_user_llm_config(user_id: int) -> LLMConfig:
-    """Load the LLM config for a given user from the metadatabase."""
-    configs = await metadb.get_all_user_configs(user_id)
+    configs = await db.get_all_user_configs(user_id)
+    role = configs.get("llm_system_prompt_role")
+    if role is None:
+        legacy = configs.get("llm_system_prompt")
+        role = legacy if legacy is not None else "You are a database diagnosis assistant."
     return LLMConfig(
         provider=configs.get("llm_provider", ""),
         api_key=configs.get("llm_api_key", ""),
         base_url=configs.get("llm_base_url", ""),
         model=configs.get("llm_model", ""),
-        system_prompt=configs.get("llm_system_prompt", "You are a database diagnosis assistant."),
+        system_prompt_role=role,
+        system_prompt_background=configs.get("llm_system_prompt_background", ""),
+        system_prompt_rules=configs.get("llm_system_prompt_rules", ""),
     )
 
 
 async def _save_user_llm_config(user_id: int, config: LLMConfig) -> None:
-    """Save the LLM config for a given user to the metadatabase."""
-    await metadb.set_user_config(user_id, "llm_provider", config.provider)
-    await metadb.set_user_config(user_id, "llm_api_key", config.api_key)
-    await metadb.set_user_config(user_id, "llm_base_url", config.base_url)
-    await metadb.set_user_config(user_id, "llm_model", config.model)
-    await metadb.set_user_config(user_id, "llm_system_prompt", config.system_prompt)
+    await db.set_user_config(user_id, "llm_provider", config.provider)
+    await db.set_user_config(user_id, "llm_api_key", config.api_key)
+    await db.set_user_config(user_id, "llm_base_url", config.base_url)
+    await db.set_user_config(user_id, "llm_model", config.model)
+    await db.set_user_config(user_id, "llm_system_prompt_role", config.system_prompt_role)
+    await db.set_user_config(user_id, "llm_system_prompt_background", config.system_prompt_background)
+    await db.set_user_config(user_id, "llm_system_prompt_rules", config.system_prompt_rules)
+
+
+def _assemble_system_segments(config: LLMConfig) -> list:
+    segments = [
+        config.system_prompt_role,
+        config.system_prompt_background,
+        config.system_prompt_rules,
+    ]
+    return [s for s in segments if s and s.strip()]
+
+
+def _log_prompt(
+    session_id: str,
+    user: Dict[str, Any],
+    model: str,
+    provider: str,
+    raw_text: str,
+    context_attachments: List[Dict[str, Any]],
+) -> None:
+    try:
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            ),
+            "side": "gateway",
+            "session_id": session_id,
+            "user_id": user.get("id"),
+            "username": user.get("username"),
+            "model": model,
+            "provider": provider,
+            "raw_user_text": raw_text,
+            "context_attachments": context_attachments,
+        }
+        prompt_log.info(json.dumps(row, ensure_ascii=False))
+    except Exception:
+        log.exception("failed to emit gateway prompt JSONL row")
 
 
 # ---------- Static pages ----------
@@ -299,7 +329,17 @@ async def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
 
 
-# ---------- Config endpoints (metadb, JWT-authenticated) ----------
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
+
+
+@app.get("/login")
+async def login_page():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "login.html"))
+
+
+# ---------- Config endpoints ----------
 
 @app.post("/api/config")
 async def set_config(
@@ -323,9 +363,34 @@ async def get_config(
         "provider": config.provider,
         "model": config.model,
         "base_url": config.base_url,
-        "system_prompt": config.system_prompt,
-        "api_key": config.api_key,
+        "system_prompt_role": config.system_prompt_role,
+        "system_prompt_background": config.system_prompt_background,
+        "system_prompt_rules": config.system_prompt_rules,
         "has_api_key": bool(config.api_key),
+    }
+
+
+_SESSION_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+
+@app.get("/api/system_prompt/preview")
+async def preview_system_prompt(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    config = await _get_user_llm_config(current_user["id"])
+    segments = _assemble_system_segments(config)
+    if not segments:
+        segments = ["You are a database diagnosis assistant."]
+    all_segments = segments + [TOOL_USAGE_GUIDANCE]
+    assembled = "\n\n".join(all_segments)
+    return {
+        "assembled": assembled,
+        "segments": {
+            "role": config.system_prompt_role,
+            "background": config.system_prompt_background,
+            "rules": config.system_prompt_rules,
+            "tool_usage_guidance": TOOL_USAGE_GUIDANCE,
+        },
     }
 
 
@@ -337,7 +402,9 @@ async def create_session(
 ):
     config = await _get_user_llm_config(current_user["id"])
     model = config.model or "mock"
-    system_prompt = config.system_prompt or "You are a database diagnosis assistant."
+    system_prompts = _assemble_system_segments(config) or [
+        "You are a database diagnosis assistant."
+    ]
 
     api_config = None
     if config.api_key:
@@ -352,17 +419,20 @@ async def create_session(
             stub = agent_pb2_grpc.AgentServiceStub(ch)
             resp = stub.CreateSession(agent_pb2.CreateSessionRequest(
                 model=model,
-                system_prompts=[system_prompt],
+                system_prompts=system_prompts,
                 api_config=api_config,
+                data_dir=_SESSION_DATA_DIR,
+                user_id=current_user["username"],
             ))
     except grpc.RpcError as e:
-        log.error("CreateSession gRPC error: code=%s details=%s", e.code(), e.details())
+        log.error("CreateSession gRPC error: code=%s detail=%s", e.code(), e.details())
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent kernel failed to create session: {e.code().name}: {e.details()}",
-        ) from e
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create session: {e.details()}",
+        )
     log.info("created session %s (model=%s, has_api_config=%s, user=%s)",
              resp.session_id, model, api_config is not None, current_user["username"])
+    await db.register_session(current_user["id"], resp.session_id)
     return {"session_id": resp.session_id, "created_at_ms": resp.created_at_ms}
 
 
@@ -378,7 +448,6 @@ async def fork_session(
     payload: Dict[str, Any],
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Create a child session scoped to a focused investigation."""
     parent_session_id = payload.get("parent_session_id") or ""
     selected_units = payload.get("selected_units") or []
     task = (payload.get("task") or "").strip()
@@ -391,7 +460,9 @@ async def fork_session(
 
     config = await _get_user_llm_config(current_user["id"])
     model = config.model or "mock"
-    base_prompt = config.system_prompt or "You are a database diagnosis assistant."
+    base_segments = _assemble_system_segments(config) or [
+        "You are a database diagnosis assistant."
+    ]
 
     if selected_units:
         context_block = "\n\n".join(
@@ -424,7 +495,7 @@ async def fork_session(
         stub = agent_pb2_grpc.AgentServiceStub(ch)
         resp = stub.CreateSession(agent_pb2.CreateSessionRequest(
             model=model,
-            system_prompts=[base_prompt, fork_prompt],
+            system_prompts=base_segments + [fork_prompt],
             api_config=api_config,
         ))
     log.info(
@@ -432,22 +503,167 @@ async def fork_session(
         resp.session_id, parent_session_id, task, deliverable,
         len(selected_units), current_user["username"],
     )
-    return {"session_id": resp.session_id, "created_at_ms": resp.created_at_ms}
+
+    return {
+        "session_id": resp.session_id,
+        "fork_parent_id": parent_session_id,
+    }
+
+
+@app.get("/api/sessions")
+async def list_sessions(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    return await db.list_user_sessions(current_user["id"])
 
 
 @app.delete("/api/sessions/{session_id}")
-async def close_session(session_id: str):
-    with _grpc_channel() as ch:
-        stub = agent_pb2_grpc.AgentServiceStub(ch)
-        resp = stub.CloseSession(agent_pb2.CloseSessionRequest(session_id=session_id))
+async def close_session(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    owner = await db.get_session_owner(session_id)
+    if owner is not None and owner != current_user["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session not owned by you",
+        )
+    try:
+        with _grpc_channel() as ch:
+            stub = agent_pb2_grpc.AgentServiceStub(ch)
+            resp = stub.CloseSession(agent_pb2.CloseSessionRequest(session_id=session_id))
+    except grpc.RpcError as e:
+        log.warning("gRPC CloseSession error for %s: %s (continuing to delete file)", session_id, e.details())
+        resp = None
     usage = {}
-    if resp.total_usage:
+    if resp and resp.total_usage:
         usage = {
             "input_tokens": resp.total_usage.input_tokens,
             "output_tokens": resp.total_usage.output_tokens,
         }
-    log.info("closed session %s", session_id)
+    log.info("closed session %s (user=%s)", session_id, current_user["username"])
+    await db.delete_session(session_id)
+    jsonl_path = os.path.join(_SESSION_DATA_DIR, "sessions", current_user["username"], f"{session_id}.jsonl")
+    if os.path.exists(jsonl_path):
+        try:
+            os.remove(jsonl_path)
+            log.info("deleted session file %s", jsonl_path)
+        except OSError as e:
+            log.warning("failed to delete session file %s: %s", jsonl_path, e)
     return {"ok": True, "total_usage": usage}
+
+
+@app.post("/api/sessions/{session_id}/resume")
+async def resume_session(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    owner = await db.get_session_owner(session_id)
+    if owner is not None and owner != current_user["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session not owned by you",
+        )
+    config = await _get_user_llm_config(current_user["id"])
+    model = config.model or "mock"
+    system_prompts = _assemble_system_segments(config) or [
+        "You are a database diagnosis assistant."
+    ]
+
+    api_config = None
+    if config.api_key:
+        api_config = agent_pb2.ApiConfig(
+            provider=config.provider,
+            api_key=config.api_key,
+            base_url=config.base_url,
+        )
+
+    try:
+        with _grpc_channel() as ch:
+            stub = agent_pb2_grpc.AgentServiceStub(ch)
+            resp = stub.ResumeSession(agent_pb2.ResumeSessionRequest(
+                session_id=session_id,
+                data_dir=_SESSION_DATA_DIR,
+                user_id=current_user["username"],
+                model=model,
+                system_prompts=system_prompts,
+                api_config=api_config,
+            ))
+    except grpc.RpcError as e:
+        log.error("ResumeSession gRPC error for %s: code=%s detail=%s",
+                  session_id, e.code(), e.details())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to resume session: {e.details()}",
+        )
+    log.info("resumed session %s (loaded %d messages, user=%s)",
+             resp.session_id, resp.loaded_messages, current_user["username"])
+    return {
+        "session_id": resp.session_id,
+        "created_at_ms": resp.created_at_ms,
+        "loaded_messages": resp.loaded_messages,
+    }
+
+
+@app.get("/api/sessions/{session_id}/history")
+async def session_history(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    owner = await db.get_session_owner(session_id)
+    if owner is not None and owner != current_user["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session not owned by you",
+        )
+    jsonl_path = os.path.join(_SESSION_DATA_DIR, "sessions", current_user["username"], f"{session_id}.jsonl")
+    if not os.path.exists(jsonl_path):
+        return {"messages": []}
+    messages = []
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("type") == "message":
+                    msg_obj = record.get("message", {})
+                    role = msg_obj.get("role", "")
+                    blocks = msg_obj.get("blocks", [])
+                    text_parts = []
+                    for b in blocks:
+                        try:
+                            if "text" in b:
+                                txt = b["text"]
+                                if isinstance(txt, dict):
+                                    text_parts.append(txt.get("text", ""))
+                                elif isinstance(txt, str):
+                                    text_parts.append(txt)
+                            elif "thinking" in b:
+                                thk = b["thinking"]
+                                if isinstance(thk, dict):
+                                    text_parts.append(thk.get("thinking", ""))
+                                elif isinstance(thk, str):
+                                    text_parts.append(thk)
+                            elif "tool_use" in b:
+                                tu = b["tool_use"]
+                                text_parts.append(f"[Tool: {tu.get('name', '')}] {tu.get('input', '')}")
+                            elif "tool_result" in b:
+                                tr = b["tool_result"]
+                                text_parts.append(f"[Result: {tr.get('tool_name', '')}] {tr.get('output', '')[:200]}")
+                        except (KeyError, TypeError, AttributeError):
+                            continue
+                    content = "\n".join(text_parts)
+                    if content:
+                        messages.append({"role": role, "content": content})
+    except Exception as e:
+        log.error("failed to read session history for %s: %s", session_id, e)
+        return {"messages": []}
+    return {"messages": messages}
 
 
 @app.get("/api/health")
@@ -466,178 +682,21 @@ async def health():
         return {"status": "unavailable", "error": str(e)}
 
 
-# ---------- User & Skill REST endpoints ----------
-
-
-async def get_current_app_user(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
-) -> Dict[str, Any]:
-    """JWT auth dependency that also ensures the user exists in the app DB."""
-    user = await get_current_user(credentials)
-    await user_service.ensure_user(str(user["id"]), user["username"])
-    return user
-
-
-async def require_admin(
-    current_user: Dict[str, Any] = Depends(get_current_app_user),
-) -> Dict[str, Any]:
-    """FastAPI dependency that ensures the current user has admin role."""
-    if current_user.get("role") != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin privileges required",
-        )
-    log.info("admin action by user %s (id=%s)", current_user["username"], current_user["id"])
-    return current_user
-
-
-@app.get("/api/skills/square")
-async def get_skill_square(category: str = "", search: str = ""):
-    result = await skill_service.get_square_skills(
-        category=category or None,
-        search=search or None,
-    )
-    return result
-
-
-@app.get("/api/skills/mine")
-async def get_my_skills(
-    current_user: Dict[str, Any] = Depends(get_current_app_user),
-):
-    user_id = str(current_user["id"])
-    if current_user.get("role") == "admin":
-        skills = await skill_service.get_all_skills()
-    else:
-        skills = await skill_service.get_user_skills(user_id)
-    active_ids = await skill_service.get_active_skill_ids(user_id)
-    return {"skills": skills, "active_ids": active_ids}
-
-
-@app.post("/api/skills")
-async def create_skill(
-    body: dict,
-    current_user: Dict[str, Any] = Depends(get_current_app_user),
-):
-    user_id = str(current_user["id"])
-    if current_user.get("role") == "admin":
-        skill = await skill_service.create_skill(None, body, is_official=True)
-    else:
-        skill = await skill_service.create_skill(user_id, body)
-    return skill
-
-
-@app.post("/api/skills/upload")
-async def upload_skill_file(
-    file: UploadFile = File(...),
-    current_user: Dict[str, Any] = Depends(get_current_app_user),
-):
-    user_id = str(current_user["id"])
-    content = await file.read()
-    import tempfile, pathlib
-    suffix = pathlib.Path(file.filename or "skill.md").suffix
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(content)
-        tmppath = tmp.name
-    try:
-        data = SkillService.parse_skill_file(tmppath)
-        if current_user.get("role") == "admin":
-            skill = await skill_service.create_skill(None, data, is_official=True)
-        else:
-            skill = await skill_service.create_skill(user_id, data)
-        return skill
-    finally:
-        os.unlink(tmppath)
-
-
-@app.put("/api/skills")
-async def update_skill(
-    body: dict,
-    current_user: Dict[str, Any] = Depends(get_current_app_user),
-):
-    skill_id = body.get("skill_id", "")
-    user_id = str(current_user["id"])
-    if not skill_id:
-        return {"error": "skill_id required"}, 400
-    if current_user.get("role") == "admin":
-        skill = await admin_service.update_any_skill(skill_id, body)
-    else:
-        skill = await skill_service.update_skill(skill_id, user_id, body)
-    if skill is None:
-        msg = "not found" if current_user.get("role") == "admin" else "not found or not owned by user"
-        return {"error": msg}, 404
-    return skill
-
-
-@app.delete("/api/skills")
-async def delete_skill(
-    body: dict,
-    current_user: Dict[str, Any] = Depends(get_current_app_user),
-):
-    skill_id = body.get("skill_id", "")
-    user_id = str(current_user["id"])
-    if not skill_id:
-        return {"error": "skill_id required"}, 400
-    if current_user.get("role") == "admin":
-        await admin_service.delete_any_skill(skill_id)
-    else:
-        await skill_service.delete_skill(skill_id, user_id)
-    return {"ok": True}
-
-
-@app.post("/api/skills/publish")
-async def publish_skill(
-    body: dict,
-    current_user: Dict[str, Any] = Depends(get_current_app_user),
-):
-    skill_id = body.get("skill_id", "")
-    user_id = str(current_user["id"])
-    if not skill_id:
-        return {"error": "skill_id required"}, 400
-    if current_user.get("role") == "admin":
-        result = await admin_service.toggle_any_publish(skill_id)
-    else:
-        result = await skill_service.toggle_publish(skill_id, user_id)
-    if result is None:
-        msg = "not found" if current_user.get("role") == "admin" else "not found or not owned by user"
-        return {"error": msg}, 404
-    return {"is_published": result}
-
-
-@app.post("/api/skills/toggle-active")
-async def toggle_active_skill(
-    body: dict,
-    current_user: Dict[str, Any] = Depends(get_current_app_user),
-):
-    skill_id = body.get("skill_id", "")
-    user_id = str(current_user["id"])
-    if not skill_id:
-        return {"error": "skill_id required"}, 400
-    is_active = await skill_service.toggle_active(user_id, skill_id)
-    return {"is_active": is_active}
-
-
-@app.post("/api/skills/clone")
-async def clone_skill(
-    body: dict,
-    current_user: Dict[str, Any] = Depends(get_current_app_user),
-):
-    skill_id = body.get("skill_id", "")
-    user_id = str(current_user["id"])
-    if not skill_id:
-        return {"error": "skill_id required"}, 400
-    skill = await skill_service.clone_skill(skill_id, user_id)
-    if skill is None:
-        return {"error": "skill not found"}, 404
-    return skill
-
-
 # ---------- Skill preview ----------
 
 @app.post("/api/preview_skills")
-async def preview_skills(payload: dict):
-    """Stateless preview: ask the Rust kernel which skills would match a draft
-    message so the UI can render a picker before the user actually sends it."""
+async def preview_skills(
+    payload: dict,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     session_id = payload.get("session_id", "")
+    if session_id:
+        owner = await db.get_session_owner(session_id)
+        if owner is not None and owner != current_user["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Session not owned by you",
+            )
     text = payload.get("text", "")
     top_k = int(payload.get("top_k", 8))
     try:
@@ -665,11 +724,33 @@ async def preview_skills(payload: dict):
         return {"matches": [], "error": str(e)}
 
 
+# ---------- Admin endpoints ----------
+
+@app.get("/api/admin/users")
+async def admin_list_users(
+    current_user: Dict[str, Any] = Depends(require_admin),
+):
+    users = await db.get_all_users()
+    return {"users": users}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: int,
+    current_user: Dict[str, Any] = Depends(require_admin),
+):
+    if user_id == current_user["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete your own account",
+        )
+    await db.delete_user_cascade(user_id)
+    return {"ok": True}
+
+
 # ---------- WebSocket chat ----------
 
 class _ChatInputIterator:
-    """Thread-safe iterator that feeds ChatInput messages to the gRPC stream."""
-
     def __init__(self):
         self._q: queue.Queue = queue.Queue()
         self._done = False
@@ -691,7 +772,7 @@ class _ChatInputIterator:
         return item
 
 
-def _chat_output_to_json(out: agent_pb2.ChatOutput) -> Optional[Dict[str, Any]]:
+def _chat_output_to_json(out: agent_pb2.ChatOutput):
     field = out.WhichOneof("payload")
     if field == "text_delta":
         return {"type": "text_delta", "content": out.text_delta.content}
@@ -785,24 +866,22 @@ def _chat_output_to_json(out: agent_pb2.ChatOutput) -> Optional[Dict[str, Any]]:
 @app.websocket("/ws/chat/{session_id}")
 async def ws_chat(ws: WebSocket, session_id: str):
     token = ws.query_params.get("token", "")
-    user = None
-    if token:
-        payload = auth_mod.decode_access_token(token)
-        if payload is None:
-            await ws.close(code=4001, reason="Invalid or missing token")
-            log.warning("ws rejected: no/invalid token for session %s", session_id)
-            return
-        user_id = payload.get("sub")
-        if user_id is None:
-            await ws.close(code=4001, reason="Token missing subject")
-            return
-        user = await metadb.get_user_by_id(int(user_id))
-        if user is None:
-            await ws.close(code=4001, reason="User not found")
-            return
+    payload = auth_mod.decode_access_token(token)
+    if payload is None:
+        await ws.close(code=4001, reason="Invalid or missing token")
+        log.warning("ws rejected: no/invalid token for session %s", session_id)
+        return
+    user_id = payload.get("sub")
+    if user_id is None:
+        await ws.close(code=4001, reason="Token missing subject")
+        return
+    user = await db.get_user_by_id(int(user_id))
+    if user is None:
+        await ws.close(code=4001, reason="User not found")
+        return
 
     await ws.accept()
-    log.info("ws connected for session %s (user=%s)", session_id, user["username"] if user else "anonymous")
+    log.info("ws connected for session %s (user=%s)", session_id, user["username"])
 
     ch = grpc.insecure_channel(GRPC_ADDR)
     stub = agent_pb2_grpc.AgentServiceStub(ch)
@@ -813,16 +892,15 @@ async def ws_chat(ws: WebSocket, session_id: str):
     stop_event = threading.Event()
 
     def read_grpc_responses():
-        """Background thread: read gRPC responses and queue them for the WS sender."""
         try:
             for out in response_stream:
                 if stop_event.is_set():
                     break
                 field = out.WhichOneof("payload")
-                log.debug("gRRC response field=%s", field)
-                payload = _chat_output_to_json(out)
-                if payload:
-                    ws_send_queue.put(payload)
+                log.debug("gRPC response field=%s", field)
+                payload_json = _chat_output_to_json(out)
+                if payload_json:
+                    ws_send_queue.put(payload_json)
                 else:
                     log.warning("Unhandled gRPC payload field=%s", field)
         except grpc.RpcError as e:
@@ -838,14 +916,13 @@ async def ws_chat(ws: WebSocket, session_id: str):
     import asyncio
 
     async def send_loop():
-        """Forward messages from the gRPC reader thread to the WebSocket."""
         loop = asyncio.get_event_loop()
         while True:
-            payload = await loop.run_in_executor(None, ws_send_queue.get)
-            if payload is None:
+            payload_json = await loop.run_in_executor(None, ws_send_queue.get)
+            if payload_json is None:
                 break
             try:
-                await ws.send_json(payload)
+                await ws.send_json(payload_json)
             except WebSocketDisconnect:
                 break
 
@@ -862,6 +939,18 @@ async def ws_chat(ws: WebSocket, session_id: str):
                     "session %s: user_message len=%d context=%d",
                     session_id, len(content), len(context_attachments),
                 )
+                try:
+                    _user_cfg = await _get_user_llm_config(int(user_id))
+                    _log_prompt(
+                        session_id=session_id,
+                        user=user,
+                        model=_user_cfg.model,
+                        provider=_user_cfg.provider,
+                        raw_text=content,
+                        context_attachments=context_attachments,
+                    )
+                except Exception:
+                    log.exception("prompt logging failed for session %s", session_id)
                 proto_attachments = []
                 for a in context_attachments:
                     raw_meta = a.get("metadata") or {}
@@ -919,12 +1008,6 @@ async def ws_chat(ws: WebSocket, session_id: str):
             response_stream.cancel()
         except Exception:
             pass
-        # Browser refresh closes the WS without firing DELETE /api/sessions,
-        # so the rust session would otherwise linger — and if its turn was
-        # mid-proxy-wait, the session-manager thread stays blocked, queueing
-        # every subsequent gRPC command behind it. Explicitly close the
-        # session on the rust side; the close path cancels any in-flight turn
-        # via an atomic flag so the manager unblocks within ~500ms.
         try:
             with _grpc_channel() as cleanup_ch:
                 cleanup_stub = agent_pb2_grpc.AgentServiceStub(cleanup_ch)
@@ -935,57 +1018,3 @@ async def ws_chat(ws: WebSocket, session_id: str):
         except Exception as e:
             log.warning("close_session on ws disconnect failed for %s: %s", session_id, e)
         ch.close()
-
-
-# ---------- Admin endpoints ----------
-
-
-@app.get("/api/admin/users")
-async def admin_list_users(
-    current_user: Dict[str, Any] = Depends(require_admin),
-):
-    """List all users with skill counts. Admin only."""
-    users = await admin_service.get_all_users_with_counts()
-    return {"users": users}
-
-
-@app.delete("/api/admin/users/{user_id}")
-async def admin_delete_user(
-    user_id: int,
-    current_user: Dict[str, Any] = Depends(require_admin),
-):
-    """Delete a user and all their data. Admin only. Cannot delete self."""
-    if user_id == current_user["id"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete your own account",
-        )
-    await admin_service.delete_user(user_id)
-    return {"ok": True}
-
-
-@app.put("/api/admin/skills/{skill_id}")
-async def admin_update_skill(
-    skill_id: str,
-    body: dict,
-    current_user: Dict[str, Any] = Depends(require_admin),
-):
-    """Update any skill (official or community). Admin only."""
-    skill = await admin_service.update_any_skill(skill_id, body)
-    if skill is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Skill not found",
-        )
-    return skill
-
-
-# ---------- SPA catch-all — must be last ----------
-
-@app.get("/{full_path:path}")
-async def spa_fallback(full_path: str):
-    """Serve index.html for client-side routing paths (chat, settings, etc.)."""
-    # Don't interfere with API / WebSocket paths
-    if full_path.startswith("api/") or full_path.startswith("ws/"):
-        return JSONResponse(status_code=404, content={"error": "not found"})
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))

@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Settings — DB Diagnosis Assistant</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; flex-direction: column; }
+header { background: #16213e; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460; }
+header h1 { font-size: 18px; color: #e94560; }
+header a { color: #4ecca3; text-decoration: none; font-size: 14px; }
+header .logout { color: #e94560; text-decoration: none; font-size: 14px; margin-left: 16px; }
+header a:hover { text-decoration: underline; }
+.container { max-width: 600px; margin: 32px auto; padding: 0 24px; width: 100%; }
+.card { background: #16213e; border: 1px solid #0f3460; border-radius: 12px; padding: 24px; }
+.card h2 { font-size: 16px; color: #e94560; margin-bottom: 20px; }
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 13px; color: #aaa; margin-bottom: 6px; }
+.field select, .field input, .field textarea { width: 100%; padding: 10px 12px; border: 1px solid #0f3460; border-radius: 8px; background: #1a1a2e; color: #e0e0e0; font-size: 14px; outline: none; font-family: inherit; }
+.field select:focus, .field input:focus, .field textarea:focus { border-color: #e94560; }
+.field .hint { font-size: 12px; color: #666; margin-top: 4px; }
+.field textarea { resize: vertical; min-height: 60px; }
+.actions { display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+.btn { padding: 10px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; }
+.btn-primary { background: #e94560; color: #fff; }
+.btn-primary:hover { background: #c73650; }
+.btn-secondary { background: #0f3460; color: #e0e0e0; }
+.btn-secondary:hover { background: #1a4a8a; }
+#status-msg { margin-top: 16px; font-size: 13px; min-height: 20px; }
+#status-msg.ok { color: #4ecca3; }
+#status-msg.err { color: #e94560; }
+.presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.preset-chip { padding: 6px 14px; background: #1a1a2e; border: 1px solid #0f3460; border-radius: 20px; font-size: 12px; cursor: pointer; color: #aaa; transition: all 0.15s; }
+.preset-chip:hover, .preset-chip.active { border-color: #e94560; color: #e94560; }
+
+/* Nested module: the three segments visually belong to one System Prompt unit. */
+.subcard { background: #11192e; border: 1px solid #0f3460; border-radius: 10px; padding: 18px 18px 14px; margin: 4px 0 18px; }
+.subcard-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+.subcard-header h3 { font-size: 14px; color: #4ecca3; font-weight: 600; letter-spacing: 0.02em; }
+.subcard-header .subcard-hint { font-size: 11px; color: #6a7090; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.subcard-intro { font-size: 12px; color: #8890a8; margin-bottom: 14px; line-height: 1.5; }
+.segment { position: relative; padding-left: 28px; }
+.segment + .segment { margin-top: 10px; }
+.segment-num { position: absolute; left: 0; top: 4px; width: 20px; height: 20px; border-radius: 50%; background: #0f3460; color: #4ecca3; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.segment label { display: block; font-size: 13px; color: #c5c5d0; margin-bottom: 6px; font-weight: 500; }
+.segment label .segment-sub { color: #6a7090; font-weight: 400; font-size: 12px; margin-left: 4px; }
+.segment textarea { width: 100%; padding: 10px 12px; border: 1px solid #0f3460; border-radius: 8px; background: #1a1a2e; color: #e0e0e0; font-size: 14px; outline: none; font-family: inherit; resize: vertical; min-height: 90px; }
+.segment textarea:focus { border-color: #e94560; }
+.segment .hint { font-size: 11px; color: #6a7090; margin-top: 4px; }
+.segment-joiner { display: flex; align-items: center; gap: 10px; margin: 8px 0 8px 28px; color: #4a5070; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.segment-joiner::before, .segment-joiner::after { content: ''; flex: 1; height: 0; border-top: 1px dashed #2a3450; }
+.subcard-footer { margin-top: 14px; padding-top: 14px; border-top: 1px solid #1a2342; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.subcard-footer .footer-note { font-size: 11px; color: #6a7090; }
+.subcard-footer .btn { padding: 8px 16px; font-size: 13px; }
+#preview-pane { display: none; margin-top: 14px; padding: 14px; background: #0c0c1a; border: 1px solid #0f3460; border-radius: 8px; color: #c5c5d0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Settings</h1>
+  <div>
+    <a href="/">&#8592; Back to Chat</a>
+    <a href="#" class="logout" id="logout-link">Logout</a>
+  </div>
+</header>
+
+<div class="container">
+  <div class="card">
+    <h2>LLM Provider Configuration</h2>
+
+    <div class="presets">
+      <span class="preset-chip" data-provider="anthropic" data-base="https://api.anthropic.com" data-model="claude-sonnet-4-20250514">Anthropic</span>
+      <span class="preset-chip" data-provider="openai" data-base="https://api.openai.com/v1" data-model="gpt-4o">OpenAI</span>
+      <span class="preset-chip" data-provider="dashscope" data-base="https://dashscope.aliyuncs.com/compatible-mode/v1" data-model="qwen-plus">DashScope</span>
+      <span class="preset-chip" data-provider="xai" data-base="https://api.x.ai/v1" data-model="grok-3-mini-fast-beta">xAI</span>
+      <span class="preset-chip" data-provider="custom" data-base="" data-model="">Custom</span>
+    </div>
+
+    <div class="field">
+      <label for="provider">Provider</label>
+      <select id="provider">
+        <option value="">-- Select --</option>
+        <option value="anthropic">Anthropic (Claude)</option>
+        <option value="openai">OpenAI (GPT)</option>
+        <option value="dashscope">DashScope (Qwen)</option>
+        <option value="xai">xAI (Grok)</option>
+        <option value="custom">Custom OpenAI-Compatible</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="api_key">API Key</label>
+      <input type="password" id="api_key" placeholder="sk-...">
+    </div>
+
+    <div class="field">
+      <label for="base_url">Base URL</label>
+      <input type="text" id="base_url" placeholder="https://api.openai.com/v1">
+      <div class="hint">Leave empty to use provider default. For custom endpoints (Ollama, vLLM, etc.), enter the full base URL.</div>
+    </div>
+
+    <div class="field">
+      <label for="model">Model</label>
+      <input type="text" id="model" placeholder="e.g., gpt-4o, claude-sonnet-4-20250514">
+    </div>
+
+    <div class="subcard">
+      <div class="subcard-header">
+        <h3>System Prompt</h3>
+        <span class="subcard-hint">role + background + rules → joined by \n\n</span>
+      </div>
+      <div class="subcard-intro">
+        The three segments below are concatenated in order and sent as the
+        system prompt for every new session. Leave a segment empty to drop it
+        from the join.
+      </div>
+
+      <div class="segment">
+        <span class="segment-num">1</span>
+        <label for="system_prompt_role">角色 <span class="segment-sub">Role</span></label>
+        <textarea id="system_prompt_role">You are a database diagnosis assistant.</textarea>
+        <div class="hint">Who the assistant is. Stays roughly stable across sessions.</div>
+      </div>
+
+      <div class="segment-joiner">\n\n</div>
+
+      <div class="segment">
+        <span class="segment-num">2</span>
+        <label for="system_prompt_background">背景 <span class="segment-sub">Background</span></label>
+        <textarea id="system_prompt_background" placeholder="Optional context about your environment, stack, or current investigation."></textarea>
+        <div class="hint">Domain context the assistant should assume — db engines, scale, recent incidents.</div>
+      </div>
+
+      <div class="segment-joiner">\n\n</div>
+
+      <div class="segment">
+        <span class="segment-num">3</span>
+        <label for="system_prompt_rules">规则 <span class="segment-sub">Rules</span></label>
+        <textarea id="system_prompt_rules" placeholder="Optional hard constraints: forbidden actions, response shape, escalation policy."></textarea>
+        <div class="hint">Hard rules the assistant must follow. Appended after Background.</div>
+      </div>
+
+      <div class="subcard-footer">
+        <span class="footer-note">Preview shows the assembled prompt including the kernel's built-in tool-usage guidance.</span>
+        <button class="btn btn-secondary" id="preview-btn">Preview full prompt</button>
+      </div>
+
+      <pre id="preview-pane"></pre>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-primary" id="save-btn">Save Configuration</button>
+      <button class="btn btn-secondary" id="test-btn">Test Connection</button>
+    </div>
+
+    <div id="status-msg"></div>
+  </div>
+</div>
+
+<script>
+// ---------- Auth helpers ----------
+function getToken() { return localStorage.getItem('jwt_token'); }
+function authFetch(url, opts) {
+  opts = opts || {};
+  const h = new Headers(opts.headers || {});
+  const t = getToken();
+  if (t) h.set('Authorization', 'Bearer ' + t);
+  if (opts.body) h.set('Content-Type', 'application/json');
+  opts.headers = h;
+  return fetch(url, opts);
+}
+function checkAuth() {
+  if (!getToken()) { window.location.href = '/login'; return false; }
+  return true;
+}
+function logout() {
+  localStorage.removeItem('jwt_token');
+  window.location.href = '/login';
+}
+
+const providerEl = document.getElementById('provider');
+const apiKeyEl = document.getElementById('api_key');
+const baseUrlEl = document.getElementById('base_url');
+const modelEl = document.getElementById('model');
+const sysRoleEl = document.getElementById('system_prompt_role');
+const sysBackgroundEl = document.getElementById('system_prompt_background');
+const sysRulesEl = document.getElementById('system_prompt_rules');
+const previewPane = document.getElementById('preview-pane');
+const statusMsg = document.getElementById('status-msg');
+
+function currentConfigBody() {
+  return {
+    provider: providerEl.value,
+    api_key: apiKeyEl.value,
+    base_url: baseUrlEl.value,
+    model: modelEl.value,
+    system_prompt_role: sysRoleEl.value,
+    system_prompt_background: sysBackgroundEl.value,
+    system_prompt_rules: sysRulesEl.value,
+  };
+}
+
+const presetDefaults = {
+  anthropic: { base_url: 'https://api.anthropic.com', model: 'claude-sonnet-4-20250514' },
+  openai: { base_url: 'https://api.openai.com/v1', model: 'gpt-4o' },
+  dashscope: { base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+  xai: { base_url: 'https://api.x.ai/v1', model: 'grok-3-mini-fast-beta' },
+  custom: { base_url: '', model: '' },
+};
+
+document.querySelectorAll('.preset-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    const p = chip.dataset.provider;
+    providerEl.value = p;
+    baseUrlEl.value = chip.dataset.base;
+    modelEl.value = chip.dataset.model;
+    document.querySelectorAll('.preset-chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+  });
+});
+
+providerEl.addEventListener('change', () => {
+  const p = providerEl.value;
+  if (presetDefaults[p]) {
+    baseUrlEl.value = presetDefaults[p].base_url;
+    modelEl.value = presetDefaults[p].model;
+  }
+  document.querySelectorAll('.preset-chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.provider === p);
+  });
+});
+
+function showStatus(text, ok) {
+  statusMsg.textContent = text;
+  statusMsg.className = ok ? 'ok' : 'err';
+}
+
+document.getElementById('save-btn').addEventListener('click', async () => {
+  if (!providerEl.value) { showStatus('Please select a provider.', false); return; }
+  if (!apiKeyEl.value) { showStatus('Please enter an API key.', false); return; }
+  if (!modelEl.value) { showStatus('Please enter a model name.', false); return; }
+
+  try {
+    const resp = await authFetch('/api/config', {
+      method: 'POST',
+      body: JSON.stringify(currentConfigBody())
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showStatus('Configuration saved successfully!', true);
+    } else {
+      showStatus('Failed to save: ' + JSON.stringify(data), false);
+    }
+  } catch (e) {
+    showStatus('Error: ' + e.message, false);
+  }
+});
+
+document.getElementById('preview-btn').addEventListener('click', async () => {
+  // Save first so the preview reflects what's actually in the DB. Skip if
+  // required fields are missing — partial state is fine for a preview.
+  try {
+    if (providerEl.value && apiKeyEl.value && modelEl.value) {
+      await authFetch('/api/config', {
+        method: 'POST',
+        body: JSON.stringify(currentConfigBody())
+      });
+    }
+    const resp = await authFetch('/api/system_prompt/preview');
+    if (resp.status === 401) { logout(); return; }
+    const data = await resp.json();
+    previewPane.textContent = data.assembled || '(empty)';
+    previewPane.style.display = 'block';
+    showStatus('Preview shown — this is what the LLM will see for new sessions.', true);
+  } catch (e) {
+    showStatus('Preview failed: ' + e.message, false);
+  }
+});
+
+document.getElementById('test-btn').addEventListener('click', async () => {
+  if (!apiKeyEl.value || !modelEl.value) {
+    showStatus('Save configuration first.', false);
+    return;
+  }
+  showStatus('Testing connection...', true);
+
+  try {
+    await authFetch('/api/config', {
+      method: 'POST',
+      body: JSON.stringify(currentConfigBody())
+    });
+
+    const sessionResp = await authFetch('/api/sessions', { method: 'POST' });
+    const session = await sessionResp.json();
+    if (!session.session_id) {
+      showStatus('Failed to create session: ' + JSON.stringify(session), false);
+      return;
+    }
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(proto + '//' + location.host + '/ws/chat/' + session.session_id + '?token=' + encodeURIComponent(getToken()));
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'user_message', content: 'Hello, reply with a single word: working.' }));
+    };
+
+    let gotResponse = false;
+    ws.onmessage = (evt) => {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === 'text_delta' && !gotResponse) {
+        gotResponse = true;
+        showStatus('Connection successful! LLM responded.', true);
+        ws.close();
+        fetch('/api/sessions/' + session.session_id, { method: 'DELETE', headers: new Headers({ 'Authorization': 'Bearer ' + getToken() }) });
+      } else if (msg.type === 'error') {
+        showStatus('LLM error: ' + msg.message, false);
+        ws.close();
+        fetch('/api/sessions/' + session.session_id, { method: 'DELETE', headers: new Headers({ 'Authorization': 'Bearer ' + getToken() }) });
+      } else if (msg.type === 'turn_complete' && !gotResponse) {
+        showStatus('Turn completed but no text received. Check model/config.', false);
+        ws.close();
+        fetch('/api/sessions/' + session.session_id, { method: 'DELETE', headers: new Headers({ 'Authorization': 'Bearer ' + getToken() }) });
+      }
+    };
+
+    ws.onerror = () => {
+      showStatus('WebSocket connection error.', false);
+    };
+
+    setTimeout(() => {
+      if (!gotResponse) {
+        showStatus('Timeout — no response within 15s.', false);
+        ws.close();
+        fetch('/api/sessions/' + session.session_id, { method: 'DELETE', headers: new Headers({ 'Authorization': 'Bearer ' + getToken() }) });
+      }
+    }, 15000);
+
+  } catch (e) {
+    showStatus('Error: ' + e.message, false);
+  }
+});
+
+async function loadConfig() {
+  try {
+    const resp = await authFetch('/api/config');
+    if (resp.status === 401) { logout(); return; }
+    const data = await resp.json();
+    if (data.provider) providerEl.value = data.provider;
+    if (data.base_url) baseUrlEl.value = data.base_url;
+    if (data.model) modelEl.value = data.model;
+    if (typeof data.system_prompt_role === 'string') sysRoleEl.value = data.system_prompt_role;
+    if (typeof data.system_prompt_background === 'string') sysBackgroundEl.value = data.system_prompt_background;
+    if (typeof data.system_prompt_rules === 'string') sysRulesEl.value = data.system_prompt_rules;
+    if (data.has_api_key) apiKeyEl.placeholder = '(saved — enter to change)';
+    document.querySelectorAll('.preset-chip').forEach(c => {
+      c.classList.toggle('active', c.dataset.provider === data.provider);
+    });
+  } catch (e) {}
+}
+document.getElementById('logout-link').addEventListener('click', (e) => { e.preventDefault(); logout(); });
+if (checkAuth()) loadConfig();
+</script>
+</body>
+</html>

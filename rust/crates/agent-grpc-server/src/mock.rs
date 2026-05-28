@@ -28,4 +28,12 @@ impl ApiClient for MockApiClient {
             AssistantEvent::MessageStop,
         ])
     }
+
+    fn model(&self) -> &str {
+        "mock"
+    }
+
+    fn provider(&self) -> &str {
+        "mock"
+    }
 }

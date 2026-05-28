@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import json
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import aiosqlite
 
@@ -34,7 +34,17 @@ CREATE TABLE IF NOT EXISTS user_configs (
     key     TEXT    NOT NULL,
     value   TEXT    NOT NULL,
     UNIQUE(user_id, key),
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+"""
+
+_CREATE_USER_SESSIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    session_id TEXT    NOT NULL UNIQUE,
+    created_at REAL   NOT NULL DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 """
 
@@ -50,11 +60,12 @@ async def init_db() -> None:
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
-    await db.executescript(_CREATE_USERS_TABLE + _CREATE_USER_CONFIGS_TABLE)
-    # Migration: add role column for databases created before admin feature
+    await db.executescript(_CREATE_USERS_TABLE + _CREATE_USER_CONFIGS_TABLE + _CREATE_USER_SESSIONS_TABLE)
+    # Migration: add role column if missing (existing databases)
     try:
         await db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
-    except aiosqlite.OperationalError:
+        log.info("migration: added role column to users table")
+    except Exception:
         pass  # column already exists
     await db.commit()
     await db.close()
@@ -181,16 +192,72 @@ async def get_all_user_configs(user_id: int) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Admin operations
+# Session ownership operations
 # ---------------------------------------------------------------------------
 
+async def register_session(user_id: int, session_id: str) -> None:
+    db = await _get_db()
+    try:
+        await db.execute(
+            "INSERT INTO user_sessions (user_id, session_id) VALUES (?, ?)",
+            (user_id, session_id),
+        )
+        await db.commit()
+    except aiosqlite.IntegrityError:
+        log.warning("duplicate session_id: %s", session_id)
+    finally:
+        await db.close()
 
-async def get_all_users() -> list[Dict[str, Any]]:
-    """Return all users (id, username, role, created_at) — no hashed_pw."""
+
+async def get_session_owner(session_id: str) -> Optional[int]:
     db = await _get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, role, created_at FROM users ORDER BY created_at DESC"
+            "SELECT user_id FROM user_sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        row = await cursor.fetchone()
+        return row["user_id"] if row else None
+    finally:
+        await db.close()
+
+
+async def list_user_sessions(user_id: int) -> List[Dict[str, Any]]:
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT session_id, created_at FROM user_sessions WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [{"session_id": r["session_id"], "created_at": r["created_at"], "created_at_ms": int(r["created_at"] * 1000) if r["created_at"] else None} for r in rows]
+    finally:
+        await db.close()
+
+
+async def delete_session(session_id: str) -> bool:
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "DELETE FROM user_sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Admin operations
+# ---------------------------------------------------------------------------
+
+async def get_all_users() -> List[Dict[str, Any]]:
+    """Return id, username, role, created_at for all users (no hashed_pw)."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, username, role, created_at FROM users ORDER BY id",
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
@@ -199,27 +266,33 @@ async def get_all_users() -> list[Dict[str, Any]]:
 
 
 async def set_user_role(user_id: int, role: str) -> None:
-    """Set the role for a user (e.g. promote to admin)."""
+    """Set the role for a user (e.g. 'admin', 'user')."""
     db = await _get_db()
     try:
-        await db.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+        await db.execute(
+            "UPDATE users SET role = ? WHERE id = ?",
+            (role, user_id),
+        )
         await db.commit()
     finally:
         await db.close()
 
 
 async def update_user_password(user_id: int, hashed_pw: str) -> None:
-    """Update the password hash for a user."""
+    """Update password hash for a user."""
     db = await _get_db()
     try:
-        await db.execute("UPDATE users SET hashed_pw = ? WHERE id = ?", (hashed_pw, user_id))
+        await db.execute(
+            "UPDATE users SET hashed_pw = ? WHERE id = ?",
+            (hashed_pw, user_id),
+        )
         await db.commit()
     finally:
         await db.close()
 
 
 async def delete_user_cascade(user_id: int) -> bool:
-    """Delete a user from metadb. Cascades to user_configs via FK."""
+    """Delete a user from metadb (user_sessions cascade via FK)."""
     db = await _get_db()
     try:
         cursor = await db.execute("DELETE FROM users WHERE id = ?", (user_id,))

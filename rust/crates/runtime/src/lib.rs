@@ -79,7 +79,7 @@ pub use config_validate::{
 pub use conversation::{
     auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent,
     ConversationRuntime, PromptCacheEvent, StaticToolExecutor, ToolError, ToolExecutor,
-    TurnSummary,
+    TurnObserver, TurnSummary,
 };
 pub use error::{ApiFailure, RuntimeError};
 pub use file_ops::{
@@ -141,8 +141,9 @@ pub use policy_engine::{
     PolicyEngine, PolicyRule, ReconcileReason, ReviewStatus,
 };
 pub use prompt::{
-    load_system_prompt, prepend_bullets, ContextFile, ModelFamilyIdentity, ProjectContext,
-    PromptBuildError, SystemPromptBuilder, FRONTIER_MODEL_NAME, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    load_diagnosis_system_prompt, load_system_prompt, prepend_bullets, today_utc_ymd, ContextFile,
+    ModelFamilyIdentity, ProjectContext, PromptBuildError, SystemPromptBuilder,
+    FRONTIER_MODEL_NAME, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{
     attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryAttemptState,

@@ -44,7 +44,10 @@ impl Display for RuntimeError {
                 write!(f, "{msg}")
             }
             Self::MaxIterations => {
-                write!(f, "conversation loop exceeded the maximum number of iterations")
+                write!(
+                    f,
+                    "conversation loop exceeded the maximum number of iterations"
+                )
             }
             Self::Cancelled => write!(f, "turn cancelled"),
             Self::Internal { source, message } => {

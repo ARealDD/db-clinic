@@ -1,13 +1,1682 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DB Clinic</title>
-  <script type="module" crossorigin src="/static/assets/index-C2epx4Sy.js"></script>
-  <link rel="stylesheet" crossorigin href="/static/assets/index-BZBhykAU.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DB Diagnosis Assistant</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+header { background: #16213e; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460; }
+header h1 { font-size: 18px; color: #e94560; }
+#status { font-size: 13px; color: #888; }
+#status.connected { color: #4ecca3; }
+#status.error { color: #e94560; }
+
+#main { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+#pane-container {
+  flex: 1; display: grid; gap: 1px; background: #0f3460; min-height: 0;
+  grid-template-columns: 1fr;
+}
+#pane-container[data-pane-count="2"] { grid-template-columns: 1fr 1fr; }
+#pane-container[data-pane-count="3"] { grid-template-columns: 1fr 1fr 1fr; }
+
+#session-sidebar {
+  width: 220px; flex-shrink: 0; border-right: 1px solid #0f3460;
+  background: #141430; display: flex; flex-direction: column; overflow: hidden;
+}
+#session-sidebar .sidebar-header {
+  padding: 10px 14px; font-size: 12px; font-weight: 600; letter-spacing: 0.5px;
+  color: #8888bb; text-transform: uppercase; background: #0f1a35;
+  border-bottom: 1px solid #0f3460; display: flex; justify-content: space-between; align-items: center;
+}
+#new-session-btn {
+  background: #0f3460; color: #4ecca3; border: 1px solid #1a5296; border-radius: 6px;
+  padding: 2px 10px; font-size: 11px; cursor: pointer; font-weight: 600;
+}
+#new-session-btn:hover { background: #1a5296; }
+#session-list { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.session-entry {
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 12px; color: #8888bb;
+  transition: background 0.1s;
+}
+.session-entry:hover { background: #1e1e3a; }
+.session-entry.active { background: #0f3460; color: #4ecca3; }
+.session-entry .sid { flex: 1; font-family: "Cascadia Code", Consolas, monospace; }
+.session-entry .del-btn {
+  background: none; border: none; color: #666; cursor: pointer; font-size: 10px;
+  padding: 2px 4px; border-radius: 4px;
+}
+.session-entry .del-btn:hover { color: #e94560; background: #3a1a1a; }
+
+.pane { display: flex; flex-direction: column; background: #1a1a2e; min-height: 0; overflow: hidden; }
+.pane-header {
+  padding: 8px 14px; background: #16213e; border-bottom: 1px solid #0f3460;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 13px; flex-shrink: 0;
+}
+.pane.role-fork .pane-header { border-top: 2px solid #fb8500; }
+.pane-title { font-weight: 600; color: #e6edf3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane.role-fork .pane-title { color: #fb8500; }
+.pane-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.pane-actions button {
+  padding: 4px 10px; background: transparent; color: #8888bb; border: 1px solid #1a5296;
+  border-radius: 12px; cursor: pointer; font-size: 11px; font-family: inherit;
+}
+.pane-actions button:hover:not(:disabled) { background: #0f3460; color: #e0e0e0; }
+.pane-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+.pane-actions .btn-open-fork { border-color: #fb8500; color: #fb8500; }
+.pane-actions .btn-open-fork:hover:not(:disabled) { background: #2a1a08; }
+.pane-actions .btn-send-parent { border-color: #4ecca3; color: #4ecca3; }
+.pane-actions .btn-send-parent:hover:not(:disabled) { background: #1a3a2e; }
+.pane-actions .btn-close { border-color: #e94560; color: #e94560; padding: 2px 8px; }
+.pane-actions .btn-close:hover:not(:disabled) { background: #3a1a1a; }
+
+.pane-chat { flex: 1; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.pane-input-area { display: flex; gap: 8px; padding: 10px 14px; background: #16213e; border-top: 1px solid #0f3460; flex-shrink: 0; }
+.pane-input {
+  flex: 1; padding: 10px 14px; border: 1px solid #0f3460; border-radius: 8px;
+  background: #1a1a2e; color: #e0e0e0; font-size: 14px; outline: none; resize: none; font-family: inherit;
+}
+.pane-input:focus { border-color: #e94560; }
+.pane-send-btn { padding: 10px 22px; background: #e94560; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; }
+.pane-send-btn:hover:not(:disabled) { background: #c73650; }
+.pane-send-btn:disabled { background: #444; cursor: not-allowed; }
+
+#tool-sidebar {
+  width: 340px; flex-shrink: 0; border-left: 1px solid #0f3460;
+  background: #141430; display: flex; flex-direction: column; overflow: hidden;
+}
+.sidebar-header {
+  padding: 10px 14px; font-size: 12px; font-weight: 600; letter-spacing: 0.5px;
+  color: #8888bb; text-transform: uppercase; background: #0f1a35;
+  border-bottom: 1px solid #0f3460; display: flex; justify-content: space-between; align-items: center;
+}
+.sidebar-header .count {
+  background: #0f3460; color: #4ecca3; padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0;
+}
+#tool-list { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+#tool-list .empty { color: #555; font-size: 12px; font-style: italic; text-align: center; padding: 16px 8px; }
+
+.tool-entry {
+  background: #1a1a2e; border: 1px solid #0f3460; border-radius: 6px;
+  font-size: 12px; overflow: hidden;
+}
+.tool-entry .te-header {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  cursor: pointer; user-select: none;
+}
+.tool-entry .te-header:hover { background: #1e1e3a; }
+.tool-entry .te-arrow { font-size: 9px; color: #666; transition: transform 0.15s; }
+.tool-entry.expanded .te-arrow { transform: rotate(90deg); }
+.tool-entry .te-name { flex: 1; font-family: "Cascadia Code", Consolas, monospace; color: #e0e0e0; }
+.tool-entry .te-pane-badge {
+  font-size: 9px; padding: 1px 5px; border-radius: 6px; background: #0f3460; color: #8888bb;
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.tool-entry .te-pane-badge.fork { background: #2a1a08; color: #fb8500; }
+.tool-entry .te-fork-btn {
+  background: transparent; border: 1px solid #444; color: #888; padding: 1px 6px;
+  border-radius: 4px; cursor: pointer; font-size: 10px;
+}
+.tool-entry .te-fork-btn:hover { color: #fb8500; border-color: #fb8500; }
+.tool-entry.fork-selected .te-fork-btn { color: #fb8500; border-color: #fb8500; background: #2a1a08; }
+.tool-entry .te-status {
+  padding: 2px 7px; border-radius: 9px; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.3px; text-transform: uppercase;
+}
+.tool-entry .te-status[data-status="running"] { background: #16163a; color: #8888bb; }
+.tool-entry .te-status[data-status="ok"] { background: #1a3a2e; color: #4ecca3; }
+.tool-entry .te-status[data-status="error"],
+.tool-entry .te-status[data-status="fail"] { background: #3a1a1a; color: #e94560; }
+.tool-entry .te-output {
+  display: none; padding: 8px 10px; background: #0d1117; color: #cfd8e3;
+  font-family: "Cascadia Code", Consolas, monospace; font-size: 11px;
+  white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow-y: auto;
+  border-top: 1px solid #0f3460;
+}
+.tool-entry.expanded .te-output { display: block; }
+
+.toggle-btn {
+  padding: 4px 12px; background: transparent; color: #8888bb;
+  border: 1px solid #1a5296; border-radius: 14px; cursor: pointer;
+  font-size: 12px; font-family: inherit;
+}
+.toggle-btn:hover { background: #0f3460; color: #e0e0e0; }
+.toggle-btn.active { background: #e94560; border-color: #e94560; color: #fff; }
+
+.msg { position: relative; max-width: 85%; padding: 10px 14px; border-radius: 10px; line-height: 1.6; word-break: break-word; font-size: 14px; }
+.msg.user { align-self: flex-end; background: #0f3460; color: #fff; border-bottom-right-radius: 2px; white-space: pre-wrap; }
+.msg.assistant { align-self: flex-start; background: #16213e; color: #e0e0e0; border-bottom-left-radius: 2px; border: 1px solid #0f3460; }
+.msg.system { align-self: center; background: transparent; color: #666; font-size: 12px; font-style: italic; }
+.msg.tool { align-self: flex-start; background: #1a1a2e; color: #4ecca3; font-size: 12px; border: 1px dashed #4ecca3; font-family: monospace; white-space: pre-wrap; }
+.msg.fork-note { align-self: center; background: #2a1a08; color: #fb8500; font-size: 12px; border: 1px dashed #fb8500; padding: 8px 14px; max-width: 90%; }
+
+/* Markdown content styling */
+.msg.assistant h1, .msg.assistant h2, .msg.assistant h3,
+.msg.assistant h4, .msg.assistant h5, .msg.assistant h6 {
+  color: #e94560; margin: 12px 0 6px 0; line-height: 1.3;
+}
+.msg.assistant h1 { font-size: 1.4em; border-bottom: 1px solid #0f3460; padding-bottom: 4px; }
+.msg.assistant h2 { font-size: 1.25em; border-bottom: 1px solid #0f3460; padding-bottom: 3px; }
+.msg.assistant h3 { font-size: 1.1em; }
+.msg.assistant p { margin: 8px 0; }
+.msg.assistant ul, .msg.assistant ol { margin: 8px 0; padding-left: 24px; }
+.msg.assistant li { margin: 3px 0; }
+.msg.assistant blockquote { border-left: 3px solid #e94560; margin: 8px 0; padding: 4px 12px; color: #aaa; background: #1a1a2e; border-radius: 0 6px 6px 0; }
+.msg.assistant a { color: #4ecca3; text-decoration: none; }
+.msg.assistant a:hover { text-decoration: underline; }
+.msg.assistant table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+.msg.assistant th, .msg.assistant td { border: 1px solid #0f3460; padding: 6px 10px; text-align: left; }
+.msg.assistant th { background: #0f3460; color: #e0e0e0; }
+.msg.assistant tr:nth-child(even) { background: #1a1a2e; }
+.msg.assistant hr { border: none; border-top: 1px solid #0f3460; margin: 12px 0; }
+.msg.assistant img { max-width: 100%; border-radius: 6px; }
+.msg.assistant strong { color: #fff; }
+.msg.assistant code {
+  background: #1a1a2e; color: #4ecca3; padding: 2px 6px; border-radius: 4px;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace; font-size: 0.9em;
+}
+.msg.assistant pre {
+  background: #0d1117; border: 1px solid #0f3460; border-radius: 8px;
+  margin: 10px 0; padding: 12px; overflow-x: auto;
+}
+.msg.assistant pre code {
+  background: transparent; color: #e0e0e0; padding: 0; font-size: 13px;
+  line-height: 1.5; display: block;
+}
+
+.thinking-block { align-self: flex-start; max-width: 85%; border: 1px solid #2a2a4a; border-radius: 10px; overflow: hidden; font-size: 13px; }
+.thinking-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #1e1e3a; cursor: pointer; user-select: none; color: #8888bb; }
+.thinking-header:hover { background: #252550; }
+.thinking-header .arrow { transition: transform 0.2s; font-size: 10px; }
+.thinking-header .arrow.open { transform: rotate(90deg); }
+.thinking-header .label { font-style: italic; }
+.thinking-header .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #444; border-top-color: #8888bb; border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.thinking-body { padding: 10px 12px; background: #16163a; color: #9999cc; white-space: pre-wrap; word-break: break-word; line-height: 1.5; max-height: 300px; overflow-y: auto; display: none; }
+.thinking-body.visible { display: block; }
+
+.cursor { display: inline-block; width: 2px; height: 1em; background: #e94560; animation: blink 0.6s step-end infinite; vertical-align: text-bottom; margin-left: 1px; }
+@keyframes blink { 50% { opacity: 0; } }
+
+.usage { font-size: 11px; color: #555; text-align: center; margin-top: 4px; }
+
+/* Skill badges */
+.skill-badges { align-self: flex-start; display: flex; flex-wrap: wrap; gap: 6px; max-width: 85%; }
+.skill-badge { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 14px; font-size: 11px; font-weight: 500; line-height: 1; }
+.skill-badge.case { background: #0f3460; color: #6ec6ff; border: 1px solid #1a5296; }
+.skill-badge.knowledge { background: #1a3a2e; color: #4ecca3; border: 1px solid #2a6a4e; }
+.skill-badge .score { opacity: 0.6; font-size: 10px; }
+
+/* Proxy instruction card */
+.proxy-card {
+  position: relative; align-self: stretch; max-width: 85%; align-self: flex-start;
+  background: #1e1e3a; border: 1px solid #e94560; border-radius: 10px;
+  padding: 12px 14px; font-size: 13px;
+}
+.proxy-card .pc-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.proxy-card .pc-badge { background: #e94560; color: #fff; font-size: 10px; padding: 2px 8px; border-radius: 10px; letter-spacing: 0.3px; }
+.proxy-card .pc-title { font-weight: 600; color: #fff; }
+.proxy-card .pc-meta { font-size: 11px; color: #888; margin-bottom: 8px; }
+.proxy-card .pc-purpose {
+  background: #16163a; border-left: 3px solid #4ecca3; border-radius: 4px;
+  padding: 8px 10px; margin-bottom: 8px; font-size: 12px; color: #cfd8e3;
+  line-height: 1.5;
+}
+.proxy-card .pc-purpose .pc-purpose-label {
+  display: block; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+  color: #4ecca3; text-transform: uppercase; margin-bottom: 3px;
+}
+.proxy-card .pc-cmd {
+  background: #0d1117; color: #e0e0e0; padding: 10px 12px; border-radius: 6px;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; margin-bottom: 8px;
+  border: 1px solid #0f3460;
+}
+.proxy-card .pc-hint { color: #aaa; font-size: 12px; margin-bottom: 10px; }
+.proxy-card textarea {
+  width: 100%; min-height: 80px; max-height: 240px; padding: 8px 10px;
+  background: #0d1117; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 6px;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace; font-size: 12px;
+  resize: vertical; outline: none;
+}
+.proxy-card textarea:focus { border-color: #e94560; }
+.proxy-card .pc-actions { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
+.proxy-card button {
+  padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
+  font-size: 12px; font-weight: 600;
+}
+.proxy-card .btn-submit { background: #4ecca3; color: #0d1117; }
+.proxy-card .btn-submit:hover { background: #3aa88a; }
+.proxy-card .btn-error { background: #e94560; color: #fff; }
+.proxy-card .btn-error:hover { background: #c73650; }
+.proxy-card button:disabled { background: #444; color: #888; cursor: not-allowed; }
+.proxy-card .pc-status { font-size: 11px; color: #888; }
+.proxy-card.expired { border-color: #666; opacity: 0.7; }
+.proxy-card.submitted { border-color: #4ecca3; }
+.proxy-card.expired .pc-badge { background: #666; }
+.proxy-card.archived { display: none; }
+body.show-proxy-history .proxy-card.archived { display: block; opacity: 0.65; }
+
+/* Fork affordance — per-unit "add to fork" button overlaid on the top-right
+   of every selectable unit (assistant msg, user msg, proxy card). Tool entries
+   in the global sidebar get an inline version inside their header. */
+.fork-add-btn {
+  position: absolute; top: 4px; right: 4px;
+  background: transparent; border: 1px solid #555; color: #888;
+  border-radius: 4px; padding: 1px 6px; font-size: 11px; cursor: pointer;
+  opacity: 0; transition: opacity 0.15s;
+  font-family: inherit;
+}
+.msg:hover .fork-add-btn,
+.proxy-card:hover .fork-add-btn { opacity: 1; }
+.fork-add-btn:hover { color: #fb8500; border-color: #fb8500; }
+.unit-fork-selected { outline: 2px solid #fb8500; outline-offset: 2px; border-radius: 6px; }
+.unit-fork-selected .fork-add-btn { opacity: 1; color: #fb8500; border-color: #fb8500; background: #2a1a08; }
+
+.skill-picker {
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid #2a3340;
+  border-radius: 8px;
+  background: #161d27;
+  color: #d0d7de;
+}
+.skill-picker h4 { margin: 0 0 4px; font-size: 13px; color: #4ecca3; }
+.skill-picker .picker-help { font-size: 11px; color: #8b949e; margin-bottom: 8px; }
+.skill-picker .skill-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 4px; border-bottom: 1px solid #222b38;
+}
+.skill-picker .skill-row:last-of-type { border-bottom: none; }
+.skill-picker .skill-row.disabled label { opacity: 0.4; cursor: not-allowed; }
+.skill-picker label { flex: 1; cursor: pointer; line-height: 1.4; }
+.skill-picker .skill-name { font-weight: 600; color: #e6edf3; }
+.skill-picker .skill-meta { font-size: 10px; color: #8b949e; margin-left: 6px; }
+.skill-picker .skill-desc { font-size: 12px; color: #8b949e; margin-top: 2px; }
+.skill-picker .picker-actions { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+.skill-picker button {
+  padding: 6px 14px; border-radius: 4px; border: none; cursor: pointer; font-size: 12px;
+}
+.skill-picker .btn-send { background: #4ecca3; color: #0d1117; font-weight: 600; }
+.skill-picker .btn-send:hover { background: #3aa88a; }
+.skill-picker .btn-cancel { background: #444; color: #ddd; }
+.skill-picker .btn-cancel:hover { background: #555; }
+.skill-picker .picker-status { font-size: 11px; color: #8b949e; margin-left: auto; }
+
+/* Fork dialog modal */
+.fork-dialog-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.fork-dialog {
+  background: #161d27; border: 1px solid #fb8500; border-radius: 10px;
+  width: min(640px, 92vw); max-height: 90vh; display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.fork-dialog .fd-header { padding: 12px 16px; background: #2a1a08; color: #fb8500; font-weight: 600; border-bottom: 1px solid #fb8500; }
+.fork-dialog .fd-body { padding: 14px 16px; overflow-y: auto; flex: 1; }
+.fork-dialog .fd-section-label { font-size: 12px; color: #4ecca3; font-weight: 600; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.4px; }
+.fork-dialog .fd-section-label:first-child { margin-top: 0; }
+.fork-dialog .fd-selected-list { display: flex; flex-direction: column; gap: 6px; }
+.fork-dialog .fd-unit {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 10px; background: #0d1117; border: 1px solid #0f3460; border-radius: 6px;
+  font-size: 12px;
+}
+.fork-dialog .fd-unit .fd-kind { color: #8888bb; font-family: monospace; font-size: 10px; padding: 1px 6px; background: #16213e; border-radius: 4px; flex-shrink: 0; }
+.fork-dialog .fd-unit .fd-content { flex: 1; color: #cfd8e3; white-space: pre-wrap; word-break: break-word; max-height: 80px; overflow-y: auto; }
+.fork-dialog .fd-unit .fd-remove { background: transparent; border: none; color: #e94560; cursor: pointer; font-size: 14px; padding: 0 4px; }
+.fork-dialog .fd-task {
+  width: 100%; padding: 8px 10px; background: #0d1117; color: #e0e0e0;
+  border: 1px solid #0f3460; border-radius: 6px; font-family: inherit; font-size: 13px; outline: none;
+}
+.fork-dialog .fd-task:focus { border-color: #fb8500; }
+.fork-dialog .fd-deliverable { display: flex; flex-direction: column; gap: 4px; }
+.fork-dialog .fd-deliverable label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #cfd8e3; cursor: pointer; }
+.fork-dialog .fd-footer {
+  padding: 12px 16px; background: #0f1a2a; border-top: 1px solid #0f3460;
+  display: flex; gap: 8px; justify-content: flex-end; align-items: center;
+}
+.fork-dialog .fd-footer .fd-error { color: #e94560; font-size: 12px; margin-right: auto; }
+.fork-dialog .fd-footer button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.fork-dialog .fd-footer .btn-start { background: #fb8500; color: #fff; }
+.fork-dialog .fd-footer .btn-start:hover:not(:disabled) { background: #d97000; }
+.fork-dialog .fd-footer .btn-start:disabled { background: #444; cursor: not-allowed; }
+.fork-dialog .fd-footer .btn-cancel { background: #444; color: #ddd; }
+.fork-dialog .fd-footer .btn-cancel:hover { background: #555; }
+</style>
 </head>
 <body>
-  <div id="root"></div>
+
+<header>
+  <h1>DB Diagnosis Assistant</h1>
+  <div style="display: flex; align-items: center; gap: 16px;">
+    <span id="status">Connecting...</span>
+    <button id="toggle-proxy-history" class="toggle-btn" title="Show or hide submitted proxy instruction cards from past turns">Show proxy history</button>
+    <a href="/static/settings.html" style="color: #4ecca3; text-decoration: none; font-size: 13px;">Settings</a>
+    <button id="logout-btn" class="toggle-btn" style="color: #e94560; border-color: #e94560;">Logout</button>
+  </div>
+</header>
+
+<div id="main">
+<aside id="session-sidebar">
+    <div class="sidebar-header">
+      <span>Sessions</span>
+      <button id="new-session-btn">+ New</button>
+    </div>
+    <div id="session-list"></div>
+  </aside>
+  <div id="pane-container" data-pane-count="1"></div>
+  <aside id="tool-sidebar">
+    <div class="sidebar-header">
+      <span>Tool calls</span>
+      <span class="count" id="tool-count">0</span>
+    </div>
+    <div id="tool-list"><div class="empty">No tool calls yet.</div></div>
+  </aside>
+</div>
+
+<script>
+// ---------- Auth helpers ----------
+function getToken() { return localStorage.getItem('jwt_token'); }
+function authFetch(url, opts) {
+  opts = opts || {};
+  const h = new Headers(opts.headers || {});
+  const t = getToken();
+  if (t) h.set('Authorization', 'Bearer ' + t);
+  if (opts.body) h.set('Content-Type', 'application/json');
+  opts.headers = h;
+  return fetch(url, opts);
+}
+function checkAuth() {
+  if (!getToken()) { window.location.href = '/login'; return false; }
+  return true;
+}
+function logout() {
+  localStorage.removeItem('jwt_token');
+  window.location.href = '/login';
+}
+
+marked.setOptions({
+  highlight: function(code, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      return hljs.highlight(code, { language: lang }).value;
+    }
+    return hljs.highlightAuto(code).value;
+  },
+  breaks: true,
+  gfm: true,
+});
+
+// ---------- Globals (truly global — header, tool sidebar) ----------
+const statusEl = document.getElementById('status');
+const paneContainerEl = document.getElementById('pane-container');
+const toolListEl = document.getElementById('tool-list');
+const toolCountEl = document.getElementById('tool-count');
+const toggleHistoryBtn = document.getElementById('toggle-proxy-history');
+const sessionListEl = document.getElementById('session-list');
+const newSessionBtn = document.getElementById('new-session-btn');
+
+let sessions = [];
+
+const MAX_PANES = 3;
+// paneId → Pane object. Iteration order = insertion order, which matches
+// left-to-right column order in the CSS grid.
+const panes = new Map();
+let nextPaneSeq = 0;
+
+// tool_use_id → { el, statusEl, outputEl, paneId } — global because the
+// sidebar is global. Tool entries display a small pane-badge so the operator
+// can see which pane fired the call, and a fork-add button so they can mark
+// the entry for inclusion in the next fork.
+const toolEntries = new Map();
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = cls || '';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+// ---------- Pane management ----------
+
+let currentSessionId = null;
+
+async function loadSessions() {
+  try {
+    const resp = await authFetch('/api/sessions');
+    if (resp.status === 401) { logout(); return; }
+    sessions = await resp.json();
+    renderSessionList();
+  } catch (e) { console.warn('loadSessions failed', e); }
+}
+
+function formatSessionName(s) {
+  const tsMs = s.created_at_ms || (s.created_at ? s.created_at * 1000 : null);
+  if (tsMs) {
+    const d = new Date(tsMs);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  const id = s.session_id || '';
+  return id.length > 8 ? id.substring(8) : id;
+}
+
+function renderSessionList() {
+  sessionListEl.innerHTML = '';
+  for (const s of sessions) {
+    const entry = document.createElement('div');
+    entry.className = 'session-entry' + (s.session_id === currentSessionId ? ' active' : '');
+    const sidSpan = document.createElement('span');
+    sidSpan.className = 'sid';
+    sidSpan.textContent = formatSessionName(s);
+    const delBtn = document.createElement('button');
+    delBtn.className = 'del-btn';
+    delBtn.innerHTML = '&#10005;';
+    delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteSession(s.session_id); });
+    entry.appendChild(sidSpan);
+    entry.appendChild(delBtn);
+    entry.addEventListener('click', () => switchSession(s.session_id));
+    sessionListEl.appendChild(entry);
+  }
+}
+
+async function switchSession(sid) {
+  if (sid === currentSessionId) return;
+  currentSessionId = sid;
+  setStatus('Resuming session...', '');
+  try {
+    const resumeResp = await authFetch('/api/sessions/' + sid + '/resume', { method: 'POST' });
+    if (resumeResp.status === 401) { logout(); return; }
+    if (!resumeResp.ok) {
+      const err = await resumeResp.json().catch(() => ({ detail: resumeResp.statusText }));
+      throw new Error(err.detail || 'Server error ' + resumeResp.status);
+    }
+    renderSessionList();
+    for (const pane of panes.values()) {
+      if (pane.role === 'parent' && pane.ws) { try { pane.ws.close(); } catch(e) {} }
+    }
+    panes.clear();
+    paneContainerEl.innerHTML = '';
+    layoutPanes();
+    const parentPane = createPane({ role: 'parent', sessionId: sid });
+    if (parentPane) {
+      await loadSessionHistoryIntoPane(parentPane, sid);
+      connectPaneWebSocket(parentPane);
+    }
+  } catch (e) {
+    setStatus('Resume failed: ' + e.message, 'error');
+  }
+}
+
+async function deleteSession(sid) {
+  try {
+    await authFetch('/api/sessions/' + sid, { method: 'DELETE' });
+    sessions = sessions.filter(s => s.session_id !== sid);
+    if (sid === currentSessionId) {
+      currentSessionId = null;
+      for (const pane of panes.values()) {
+        if (pane.ws) { try { pane.ws.close(); } catch(e) {} }
+      }
+      panes.clear();
+      paneContainerEl.innerHTML = '';
+      layoutPanes();
+      setStatus('Session closed', '');
+    }
+    renderSessionList();
+  } catch (e) { console.warn('deleteSession failed', e); }
+}
+
+async function loadSessionHistoryIntoPane(pane, sid) {
+  try {
+    const resp = await authFetch('/api/sessions/' + sid + '/history');
+    if (resp.status === 401) { logout(); return; }
+    const data = await resp.json();
+    for (const m of data.messages || []) {
+      if (m.role === 'system') {
+        addMsg(pane, m.content, 'system', { forkable: false });
+      } else if (m.role === 'assistant') {
+        const div = document.createElement('div');
+        div.className = 'msg assistant';
+        div.innerHTML = DOMPurify.sanitize(marked.parse(m.content || ''), {
+          ADD_TAGS: ['hljs-keyword', 'hljs-string', 'hljs-number', 'hljs-comment', 'hljs-built_in', 'hljs-literal', 'hljs-type', 'hljs-attr', 'hljs-title', 'hljs-params', 'hljs-meta', 'hljs-symbol', 'hljs-variable', 'hljs-template-variable', 'hljs-addition', 'hljs-deletion', 'hljs-selector-class', 'hljs-selector-id', 'hljs-regexp', 'hljs-function', 'hljs-punctuation', 'hljs-operator', 'hljs-property', 'hljs-name', 'hljs-tag', 'hljs-section', 'hljs-subst', 'hljs-doctag', 'hljs-emphasis', 'hljs-strong'],
+          ALLOW_ARIA_ATTR: false, ALLOW_DATA_ATTR: false,
+        });
+        pane.chatEl.appendChild(div);
+      } else {
+        addMsg(pane, m.content, m.role || 'user');
+      }
+    }
+    scrollPane(pane, true);
+  } catch (e) { console.warn('loadSessionHistory failed', e); }
+}
+
+newSessionBtn.addEventListener('click', async () => { await createNewSession(); });
+
+async function createNewSession() {
+  setStatus('Creating session...', '');
+  try {
+    const resp = await authFetch('/api/sessions', { method: 'POST' });
+    if (resp.status === 401) { logout(); return; }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || 'Server error ' + resp.status);
+    }
+    const data = await resp.json();
+    currentSessionId = data.session_id;
+    await loadSessions();
+    for (const pane of panes.values()) {
+      if (pane.ws) { try { pane.ws.close(); } catch(e) {} }
+    }
+    panes.clear();
+    paneContainerEl.innerHTML = '';
+    layoutPanes();
+    const parentPane = createPane({ role: 'parent', sessionId: currentSessionId });
+    if (parentPane) connectPaneWebSocket(parentPane);
+  } catch (e) {
+    setStatus('Failed: ' + e.message, 'error');
+  }
+}
+
+function newPaneId() { return 'pane-' + (++nextPaneSeq); }
+
+function layoutPanes() {
+  paneContainerEl.dataset.paneCount = String(panes.size);
+}
+
+function createPane({ role, sessionId, parentPaneId, title, forkTask }) {
+  if (panes.size >= MAX_PANES) {
+    alert('已达到最大分栏数 (' + MAX_PANES + ')，请先关闭一个分栏。');
+    return null;
+  }
+  const paneId = newPaneId();
+  const isFork = role === 'fork';
+
+  const paneEl = document.createElement('div');
+  paneEl.className = 'pane role-' + role;
+  paneEl.dataset.paneId = paneId;
+
+  // Header
+  const headerEl = document.createElement('div');
+  headerEl.className = 'pane-header';
+  const titleEl = document.createElement('span');
+  titleEl.className = 'pane-title';
+  titleEl.textContent = title || (isFork ? 'Fork' : 'Main session');
+  if (forkTask) titleEl.title = 'Task: ' + forkTask;
+  headerEl.appendChild(titleEl);
+
+  const actionsEl = document.createElement('div');
+  actionsEl.className = 'pane-actions';
+
+  // Pattern 2 design forbids recursive forking — fork panes don't get an
+  // "Open fork" button or per-unit "+ fork" affordances (see attachForkButton).
+  let openForkBtn = null;
+  if (!isFork) {
+    openForkBtn = document.createElement('button');
+    openForkBtn.className = 'btn-open-fork';
+    openForkBtn.textContent = 'Open fork (0)';
+    openForkBtn.disabled = true;
+    openForkBtn.title = '从已勾选的单元创建一个聚焦的子 agent';
+    actionsEl.appendChild(openForkBtn);
+  }
+
+  let sendParentBtn = null;
+  if (isFork) {
+    sendParentBtn = document.createElement('button');
+    sendParentBtn.className = 'btn-send-parent';
+    sendParentBtn.textContent = '↩ Send result to parent';
+    sendParentBtn.disabled = true;
+    sendParentBtn.title = '把本 fork 上一轮回答打包成 fork_summary 注入父会话的下一轮';
+    actionsEl.appendChild(sendParentBtn);
+  }
+
+  let closeBtn = null;
+  if (isFork) {
+    closeBtn = document.createElement('button');
+    closeBtn.className = 'btn-close';
+    closeBtn.textContent = '×';
+    closeBtn.title = 'Close fork pane';
+    actionsEl.appendChild(closeBtn);
+  }
+
+  headerEl.appendChild(actionsEl);
+  paneEl.appendChild(headerEl);
+
+  // Chat scroll
+  const chatEl = document.createElement('div');
+  chatEl.className = 'pane-chat';
+  paneEl.appendChild(chatEl);
+
+  // Input row
+  const inputAreaEl = document.createElement('div');
+  inputAreaEl.className = 'pane-input-area';
+  const inputEl = document.createElement('textarea');
+  inputEl.className = 'pane-input';
+  inputEl.rows = 1;
+  inputEl.placeholder = isFork ? 'Type "go" or refine the fork task...' : 'Describe your database issue...';
+  inputEl.disabled = true;
+  const sendBtnEl = document.createElement('button');
+  sendBtnEl.className = 'pane-send-btn';
+  sendBtnEl.textContent = 'Send';
+  sendBtnEl.disabled = true;
+  inputAreaEl.appendChild(inputEl);
+  inputAreaEl.appendChild(sendBtnEl);
+  paneEl.appendChild(inputAreaEl);
+
+  paneContainerEl.appendChild(paneEl);
+
+  const pane = {
+    paneId,
+    role,
+    sessionId,
+    parentPaneId: parentPaneId || null,
+    forkTask: forkTask || null,
+    ws: null,
+    el: paneEl,
+    chatEl,
+    inputEl,
+    sendBtnEl,
+    openForkBtn,
+    sendParentBtn,
+    closeBtn,
+    state: {
+      currentAssistantMsg: null,
+      currentAssistantRaw: '',
+      currentCursor: null,
+      currentThinkingBlock: null,
+      currentThinkingBody: null,
+      isThinking: false,
+      renderTimer: null,
+      proxyCards: new Map(),       // instruction_id → entry
+      stickToBottom: true,
+      forkSelection: [],           // [{ unitId, kind, content, el }]
+      lastAssistantText: '',       // populated on turn_complete — fork uses this when sending back
+      busy: false,                 // true between send and turn_complete
+    },
+  };
+
+  chatEl.addEventListener('scroll', () => {
+    const distance = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight;
+    pane.state.stickToBottom = distance < 40;
+  });
+
+  sendBtnEl.addEventListener('click', () => sendMessage(pane));
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage(pane);
+    }
+  });
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  });
+
+  if (openForkBtn) openForkBtn.addEventListener('click', () => openForkDialog(pane));
+  if (sendParentBtn) sendParentBtn.addEventListener('click', () => sendForkResultToParent(pane));
+  if (closeBtn) closeBtn.addEventListener('click', () => closePane(pane));
+
+  panes.set(paneId, pane);
+  layoutPanes();
+  return pane;
+}
+
+function closePane(pane) {
+  if (pane.role !== 'fork') return;          // parent pane is permanent
+  if (pane.ws && pane.ws.readyState === WebSocket.OPEN) {
+    try { pane.ws.close(); } catch (e) { /* ignore */ }
+  }
+  // Best-effort server-side cleanup. Failure here is non-fatal — the session
+  // will be garbage-collected by the idle timer eventually.
+  if (pane.sessionId) {
+    authFetch('/api/sessions/' + pane.sessionId, { method: 'DELETE' }).catch(() => {});
+  }
+  // Drop any sidebar tool entries that belonged to this pane so the global
+  // sidebar doesn't grow unbounded across fork lifecycles.
+  for (const [tuid, entry] of toolEntries.entries()) {
+    if (entry.paneId === pane.paneId) {
+      entry.el.remove();
+      toolEntries.delete(tuid);
+    }
+  }
+  toolCountEl.textContent = toolEntries.size;
+  if (toolEntries.size === 0 && !toolListEl.querySelector('.empty')) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No tool calls yet.';
+    toolListEl.appendChild(empty);
+  }
+  pane.el.remove();
+  panes.delete(pane.paneId);
+  layoutPanes();
+}
+
+// ---------- Pane-aware DOM creators ----------
+
+function scrollPane(pane, force) {
+  if (force || pane.state.stickToBottom) {
+    pane.chatEl.scrollTop = pane.chatEl.scrollHeight;
+  }
+}
+
+function attachForkButton(pane, el, kind, contentGetter) {
+  // Adds a "+fork" button to the top-right corner of `el`. `contentGetter`
+  // returns the unit's current textual content at click time (so streaming
+  // messages capture the FINAL text, not whatever was rendered when we wired
+  // up the button).
+  if (pane.role === 'fork') return;          // no recursive forking from within a fork
+  const unitId = 'unit-' + Math.random().toString(36).slice(2, 10);
+  el.dataset.unitId = unitId;
+  const btn = document.createElement('button');
+  btn.className = 'fork-add-btn';
+  btn.textContent = '+ fork';
+  btn.title = 'Add this unit to the next fork';
+  btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    const existingIdx = pane.state.forkSelection.findIndex(u => u.unitId === unitId);
+    if (existingIdx >= 0) {
+      pane.state.forkSelection.splice(existingIdx, 1);
+      el.classList.remove('unit-fork-selected');
+    } else {
+      pane.state.forkSelection.push({ unitId, kind, content: contentGetter(), el });
+      el.classList.add('unit-fork-selected');
+    }
+    refreshForkButton(pane);
+  });
+  el.appendChild(btn);
+}
+
+function refreshForkButton(pane) {
+  if (!pane.openForkBtn) return;             // fork panes have no Open-fork button
+  const n = pane.state.forkSelection.length;
+  pane.openForkBtn.textContent = 'Open fork (' + n + ')';
+  pane.openForkBtn.disabled = n === 0 || panes.size >= MAX_PANES;
+}
+
+function refreshAllForkButtonAvailability() {
+  // Called when panes.size changes — disables "Open fork" on every pane when
+  // we're at MAX_PANES even if the operator already selected units.
+  for (const pane of panes.values()) refreshForkButton(pane);
+}
+
+function addMsg(pane, text, cls, opts) {
+  opts = opts || {};
+  const div = document.createElement('div');
+  div.className = 'msg ' + cls;
+  div.textContent = text;
+  pane.chatEl.appendChild(div);
+  if (opts.forkable !== false && (cls === 'user' || cls === 'assistant')) {
+    attachForkButton(pane, div, cls, () => div.textContent);
+  }
+  scrollPane(pane);
+  return div;
+}
+
+function removeCursor(pane) {
+  const c = pane.state.currentCursor;
+  if (c && c.parentNode) c.parentNode.removeChild(c);
+  pane.state.currentCursor = null;
+}
+
+function ensureAssistantMsg(pane) {
+  if (!pane.state.currentAssistantMsg) {
+    const el = document.createElement('div');
+    el.className = 'msg assistant';
+    pane.chatEl.appendChild(el);
+    pane.state.currentAssistantMsg = el;
+    pane.state.currentAssistantRaw = '';
+    // Wire up the fork button once. The content getter returns the raw
+    // markdown at click time, not the rendered HTML.
+    attachForkButton(pane, el, 'assistant', () => pane.state.currentAssistantRaw || el.textContent || '');
+  }
+  return pane.state.currentAssistantMsg;
+}
+
+function renderMarkdown(el, raw) {
+  const html = DOMPurify.sanitize(marked.parse(raw), {
+    ADD_TAGS: ['hljs-keyword', 'hljs-string', 'hljs-number', 'hljs-comment',
+               'hljs-built_in', 'hljs-literal', 'hljs-type', 'hljs-attr',
+               'hljs-title', 'hljs-params', 'hljs-meta', 'hljs-symbol',
+               'hljs-variable', 'hljs-template-variable', 'hljs-addition',
+               'hljs-deletion', 'hljs-selector-class', 'hljs-selector-id',
+               'hljs-regexp', 'hljs-function', 'hljs-punctuation', 'hljs-operator',
+               'hljs-property', 'hljs-name', 'hljs-tag', 'hljs-section',
+               'hljs-subst', 'hljs-doctag', 'hljs-emphasis', 'hljs-strong'],
+    ALLOW_ARIA_ATTR: false,
+    ALLOW_DATA_ATTR: false,
+  });
+  // Preserve any fork-add-btn we attached to this element before marked
+  // overwrote innerHTML.
+  const existingBtn = el.querySelector(':scope > .fork-add-btn');
+  el.innerHTML = html;
+  if (existingBtn) el.appendChild(existingBtn);
+}
+
+function scheduleRender(pane) {
+  if (pane.state.renderTimer) return;
+  pane.state.renderTimer = requestAnimationFrame(() => {
+    pane.state.renderTimer = null;
+    if (pane.state.currentAssistantMsg && pane.state.currentAssistantRaw) {
+      removeCursor(pane);
+      renderMarkdown(pane.state.currentAssistantMsg, pane.state.currentAssistantRaw);
+      const cursor = document.createElement('span');
+      cursor.className = 'cursor';
+      pane.state.currentAssistantMsg.appendChild(cursor);
+      pane.state.currentCursor = cursor;
+      scrollPane(pane);
+    }
+  });
+}
+
+function appendToAssistant(pane, text) {
+  ensureAssistantMsg(pane);
+  pane.state.currentAssistantRaw += text;
+  scheduleRender(pane);
+}
+
+function finalizeAssistant(pane) {
+  if (pane.state.renderTimer) {
+    cancelAnimationFrame(pane.state.renderTimer);
+    pane.state.renderTimer = null;
+  }
+  if (pane.state.currentAssistantMsg && pane.state.currentAssistantRaw) {
+    removeCursor(pane);
+    renderMarkdown(pane.state.currentAssistantMsg, pane.state.currentAssistantRaw);
+  }
+  if (pane.state.currentAssistantRaw) {
+    pane.state.lastAssistantText = pane.state.currentAssistantRaw;
+    if (pane.role === 'fork' && pane.sendParentBtn) {
+      pane.sendParentBtn.disabled = false;
+    }
+  }
+}
+
+function startThinkingBlock(pane) {
+  removeCursor(pane);
+  pane.state.isThinking = true;
+
+  const block = document.createElement('div');
+  block.className = 'thinking-block';
+
+  const header = document.createElement('div');
+  header.className = 'thinking-header';
+  header.innerHTML = '<span class="spinner"></span><span class="arrow">&#9654;</span><span class="label">Thinking...</span>';
+  header.addEventListener('click', () => {
+    const body = block.querySelector('.thinking-body');
+    const arrow = header.querySelector('.arrow');
+    body.classList.toggle('visible');
+    arrow.classList.toggle('open');
+  });
+  block.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'thinking-body visible';
+  block.appendChild(body);
+
+  pane.chatEl.appendChild(block);
+  pane.state.currentThinkingBlock = block;
+  pane.state.currentThinkingBody = body;
+  scrollPane(pane);
+}
+
+function appendToThinking(pane, text) {
+  if (!pane.state.currentThinkingBlock) startThinkingBlock(pane);
+  pane.state.currentThinkingBody.textContent += text;
+  scrollPane(pane);
+}
+
+function finishThinking(pane) {
+  const block = pane.state.currentThinkingBlock;
+  if (block) {
+    const header = block.querySelector('.thinking-header');
+    const spinner = header.querySelector('.spinner');
+    if (spinner) spinner.remove();
+    header.querySelector('.label').textContent = 'Thinking (done)';
+    const body = block.querySelector('.thinking-body');
+    body.classList.remove('visible');
+    header.querySelector('.arrow').classList.remove('open');
+  }
+  pane.state.currentThinkingBlock = null;
+  pane.state.currentThinkingBody = null;
+  pane.state.isThinking = false;
+}
+
+function addSkillBadges(pane, skills) {
+  const container = document.createElement('div');
+  container.className = 'skill-badges';
+  for (const s of skills) {
+    const badge = document.createElement('span');
+    badge.className = 'skill-badge ' + s.type;
+    badge.innerHTML = escapeHtml(s.name) + ' <span class="score">' + s.score + '</span>';
+    badge.title = s.category + ' | ' + s.id;
+    container.appendChild(badge);
+  }
+  pane.chatEl.appendChild(container);
+  scrollPane(pane);
+}
+
+function renderProxyInstruction(pane, msg) {
+  const card = document.createElement('div');
+  card.className = 'proxy-card';
+  card.dataset.instructionId = msg.instruction_id;
+
+  const header = document.createElement('div');
+  header.className = 'pc-header';
+  header.innerHTML =
+    '<span class="pc-badge">PROXY</span>' +
+    '<span class="pc-title">' + escapeHtml(msg.tool_name || 'tool') + '</span>';
+  card.appendChild(header);
+
+  const metaBits = [];
+  if (msg.target_environment) metaBits.push(escapeHtml(msg.target_environment));
+  if (msg.read_only) metaBits.push('read-only');
+  if (msg.timeout_seconds && msg.timeout_seconds > 0) metaBits.push('timeout ' + msg.timeout_seconds + 's');
+  if (metaBits.length) {
+    const meta = document.createElement('div');
+    meta.className = 'pc-meta';
+    meta.textContent = metaBits.join(' · ');
+    card.appendChild(meta);
+  }
+
+  if (msg.purpose) {
+    const purpose = document.createElement('div');
+    purpose.className = 'pc-purpose';
+    const label = document.createElement('span');
+    label.className = 'pc-purpose-label';
+    label.textContent = 'Agent purpose';
+    const body = document.createElement('span');
+    body.textContent = msg.purpose;
+    purpose.append(label, body);
+    card.appendChild(purpose);
+  }
+
+  const cmd = document.createElement('div');
+  cmd.className = 'pc-cmd';
+  cmd.textContent = msg.command || '(no command)';
+  card.appendChild(cmd);
+
+  if (msg.hint) {
+    const hint = document.createElement('div');
+    hint.className = 'pc-hint';
+    hint.textContent = msg.hint;
+    card.appendChild(hint);
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.placeholder = 'Paste the command output here — or, if rejecting, describe why and what the agent should do instead (e.g. "cancel, try another approach", "I can provide X, suggest a better option").';
+  card.appendChild(textarea);
+
+  const actions = document.createElement('div');
+  actions.className = 'pc-actions';
+  const submitBtn = document.createElement('button');
+  submitBtn.className = 'btn-submit';
+  submitBtn.textContent = 'Submit result';
+  const errorBtn = document.createElement('button');
+  errorBtn.className = 'btn-error';
+  errorBtn.textContent = 'Reject with feedback';
+  const status = document.createElement('span');
+  status.className = 'pc-status';
+  actions.append(submitBtn, errorBtn, status);
+  card.appendChild(actions);
+
+  const send = (isError) => {
+    if (!pane.ws || pane.ws.readyState !== WebSocket.OPEN) {
+      status.textContent = 'WebSocket disconnected';
+      return;
+    }
+    const output = textarea.value;
+    if (!output && !isError) {
+      status.textContent = 'Provide output text first';
+      return;
+    }
+    pane.ws.send(JSON.stringify({
+      type: 'proxy_result',
+      instruction_id: msg.instruction_id,
+      tool_use_id: msg.tool_use_id || '',
+      output: output || (isError ? 'user rejected the instruction without further feedback' : ''),
+      is_error: !!isError,
+    }));
+    textarea.disabled = true;
+    submitBtn.disabled = true;
+    errorBtn.disabled = true;
+    card.classList.add('submitted');
+    status.textContent = isError ? 'Feedback sent — agent will adjust' : 'Result submitted';
+  };
+
+  submitBtn.addEventListener('click', () => send(false));
+  errorBtn.addEventListener('click', () => send(true));
+
+  attachForkButton(pane, card, 'proxy_card', () => {
+    const out = textarea.value;
+    return (msg.command || '') + (out ? '\n\n--- output ---\n' + out : '');
+  });
+
+  pane.state.proxyCards.set(msg.instruction_id, { card, textarea, submitBtn, errorBtn, status });
+  pane.chatEl.appendChild(card);
+  scrollPane(pane);
+}
+
+function markProxyExpired(pane, instructionId, reason) {
+  const entry = pane.state.proxyCards.get(instructionId);
+  if (!entry) return;
+  entry.card.classList.add('expired');
+  entry.textarea.disabled = true;
+  entry.submitBtn.disabled = true;
+  entry.errorBtn.disabled = true;
+  entry.status.textContent = 'Expired (' + (reason || 'timeout') + ') — turn cancelled';
+}
+
+function renderToolExecution(pane, msg) {
+  let entry = toolEntries.get(msg.tool_use_id);
+  if (!entry) {
+    const el = document.createElement('div');
+    el.className = 'tool-entry';
+    const header = document.createElement('div');
+    header.className = 'te-header';
+    const arrow = document.createElement('span');
+    arrow.className = 'te-arrow';
+    arrow.textContent = '▶';
+    const name = document.createElement('span');
+    name.className = 'te-name';
+    name.textContent = msg.tool_name || 'tool';
+    const paneBadge = document.createElement('span');
+    paneBadge.className = 'te-pane-badge' + (pane.role === 'fork' ? ' fork' : '');
+    paneBadge.textContent = pane.role === 'fork' ? 'fork' : 'main';
+    paneBadge.title = pane.paneId;
+    const forkBtn = document.createElement('button');
+    forkBtn.className = 'te-fork-btn';
+    forkBtn.textContent = '+ fork';
+    forkBtn.title = 'Add this tool output to the next fork from ' + pane.paneId;
+    const status = document.createElement('span');
+    status.className = 'te-status';
+    const output = document.createElement('div');
+    output.className = 'te-output';
+    header.append(arrow, name, paneBadge, forkBtn, status);
+    el.append(header, output);
+    header.addEventListener('click', (ev) => {
+      // Don't toggle when clicking the fork button.
+      if (ev.target === forkBtn) return;
+      el.classList.toggle('expanded');
+    });
+    forkBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const owner = panes.get(pane.paneId);
+      if (!owner) return;
+      const unitId = 'tool-' + msg.tool_use_id;
+      const existingIdx = owner.state.forkSelection.findIndex(u => u.unitId === unitId);
+      if (existingIdx >= 0) {
+        owner.state.forkSelection.splice(existingIdx, 1);
+        el.classList.remove('fork-selected');
+      } else {
+        owner.state.forkSelection.push({
+          unitId,
+          kind: 'tool_output',
+          content: (msg.tool_name || 'tool') + ':\n' + (output.textContent || '(no output)'),
+          el,
+        });
+        el.classList.add('fork-selected');
+      }
+      refreshForkButton(owner);
+    });
+
+    const empty = toolListEl.querySelector('.empty');
+    if (empty) empty.remove();
+
+    toolListEl.appendChild(el);
+    entry = { el, statusEl: status, outputEl: output, paneId: pane.paneId };
+    toolEntries.set(msg.tool_use_id, entry);
+    toolCountEl.textContent = toolEntries.size;
+  }
+  const statusLabel = msg.status === 'started'
+    ? 'running'
+    : msg.status === 'completed' ? (msg.is_error ? 'error' : 'ok')
+    : msg.status === 'failed' ? 'fail'
+    : msg.status;
+  entry.statusEl.textContent = statusLabel;
+  entry.statusEl.dataset.status = statusLabel;
+  if (msg.output) {
+    entry.outputEl.textContent = msg.output;
+    if (statusLabel === 'fail' || statusLabel === 'error') {
+      entry.el.classList.add('expanded');
+    }
+  }
+  toolListEl.scrollTop = toolListEl.scrollHeight;
+}
+
+// ---------- WebSocket per pane ----------
+
+function connectPaneWebSocket(pane) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  pane.ws = new WebSocket(proto + '//' + location.host + '/ws/chat/' + pane.sessionId + '?token=' + encodeURIComponent(getToken()));
+
+  pane.ws.onopen = function() {
+    if (pane.role === 'parent') {
+      setStatus('Connected — Session ' + pane.sessionId.substring(0, 8) + '...', 'connected');
+    }
+    pane.inputEl.disabled = false;
+    pane.sendBtnEl.disabled = false;
+    if (pane.role === 'parent') pane.inputEl.focus();
+    addMsg(pane, pane.role === 'fork'
+      ? 'Fork ready. Type "go" (or refine the task) and press Send to kick off the investigation.'
+      : 'Connected. Type a message to start diagnosing.', 'system', { forkable: false });
+  };
+
+  pane.ws.onmessage = function(evt) {
+    const msg = JSON.parse(evt.data);
+    handlePaneEvent(pane, msg);
+  };
+
+  pane.ws.onclose = function() {
+    if (pane.role === 'parent') setStatus('Disconnected', 'error');
+    pane.inputEl.disabled = true;
+    pane.sendBtnEl.disabled = true;
+    removeCursor(pane);
+    addMsg(pane, 'WebSocket disconnected.', 'system', { forkable: false });
+  };
+
+  pane.ws.onerror = function() {
+    if (pane.role === 'parent') setStatus('Connection error', 'error');
+  };
+}
+
+function handlePaneEvent(pane, msg) {
+  switch (msg.type) {
+    case 'text_delta':
+      if (pane.state.isThinking) finishThinking(pane);
+      appendToAssistant(pane, msg.content);
+      break;
+    case 'thinking_delta':
+      appendToThinking(pane, msg.content);
+      break;
+    case 'skill_match':
+      addSkillBadges(pane, msg.skills);
+      break;
+    case 'proxy_instruction':
+      if (pane.state.isThinking) finishThinking(pane);
+      removeCursor(pane);
+      renderProxyInstruction(pane, msg);
+      break;
+    case 'proxy_instruction_expired':
+      markProxyExpired(pane, msg.instruction_id, msg.reason);
+      break;
+    case 'tool_execution':
+      renderToolExecution(pane, msg);
+      break;
+    case 'turn_complete':
+      if (pane.state.isThinking) finishThinking(pane);
+      finalizeAssistant(pane);
+      removeCursor(pane);
+      for (const entry of pane.state.proxyCards.values()) {
+        entry.card.classList.add('archived');
+      }
+      pane.state.currentAssistantMsg = null;
+      pane.state.currentAssistantRaw = '';
+      pane.state.currentThinkingBlock = null;
+      pane.state.currentThinkingBody = null;
+      if (msg.usage && (msg.usage.input_tokens || msg.usage.output_tokens)) {
+        const u = document.createElement('div');
+        u.className = 'usage';
+        u.textContent = 'Tokens: ' + msg.usage.input_tokens + ' in / ' + msg.usage.output_tokens + ' out';
+        pane.chatEl.appendChild(u);
+      }
+      pane.inputEl.disabled = false;
+      pane.sendBtnEl.disabled = false;
+      pane.state.busy = false;
+      if (pane.role === 'parent') pane.inputEl.focus();
+      break;
+    case 'error':
+      if (pane.state.isThinking) finishThinking(pane);
+      finalizeAssistant(pane);
+      removeCursor(pane);
+      addMsg(pane, 'Error: ' + msg.message, 'system', { forkable: false });
+      pane.state.busy = false;
+      if (!msg.recoverable) {
+        pane.inputEl.disabled = true;
+        pane.sendBtnEl.disabled = true;
+      } else {
+        pane.inputEl.disabled = false;
+        pane.sendBtnEl.disabled = false;
+      }
+      break;
+    case 'usage_update':
+      break;
+    default:
+      console.log('unknown pane event:', msg);
+  }
+}
+
+// ---------- Send pipeline (per pane) ----------
+
+async function sendMessage(pane) {
+  const text = pane.inputEl.value.trim();
+  if (!text || !pane.ws || pane.ws.readyState !== WebSocket.OPEN) return;
+
+  pane.inputEl.disabled = true;
+  pane.sendBtnEl.disabled = true;
+
+  let matches = [];
+  try {
+    const r = await authFetch('/api/preview_skills', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: pane.sessionId, text, top_k: 8 }),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      matches = data.matches || [];
+    }
+  } catch (e) {
+    console.warn('preview_skills failed; sending with zero skills', e);
+  }
+
+  if (matches.length === 0) {
+    finalizeSend(pane, text, []);
+    return;
+  }
+  renderSkillPicker(pane, text, matches);
+}
+
+function renderSkillPicker(pane, text, matches) {
+  const picker = document.createElement('div');
+  picker.className = 'skill-picker';
+  const header = document.createElement('h4');
+  header.textContent = 'Choose up to 3 skills to inject into the prompt';
+  picker.appendChild(header);
+  const help = document.createElement('div');
+  help.className = 'picker-help';
+  help.textContent = 'Pick the cases/knowledge most relevant to your question. Leave all unchecked to send with no skill context.';
+  picker.appendChild(help);
+
+  const MAX = 3;
+  const checkboxes = [];
+
+  matches.forEach((m, idx) => {
+    const row = document.createElement('div');
+    row.className = 'skill-row';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = m.id;
+    cb.id = 'skill-pick-' + pane.paneId + '-' + idx;
+    const label = document.createElement('label');
+    label.setAttribute('for', cb.id);
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'skill-name';
+    nameSpan.textContent = m.name;
+    const meta = document.createElement('span');
+    meta.className = 'skill-meta';
+    meta.textContent = '[' + m.type + ' · ' + m.category + ' · ' + m.score + ']';
+    label.appendChild(nameSpan);
+    label.appendChild(meta);
+    if (m.description) {
+      const desc = document.createElement('div');
+      desc.className = 'skill-desc';
+      desc.textContent = m.description;
+      label.appendChild(desc);
+    }
+    row.appendChild(cb);
+    row.appendChild(label);
+    picker.appendChild(row);
+    checkboxes.push({ cb, row });
+  });
+
+  const status = document.createElement('span');
+  status.className = 'picker-status';
+  status.textContent = '0 / ' + MAX + ' selected';
+
+  function refreshCap() {
+    const checkedCount = checkboxes.filter(c => c.cb.checked).length;
+    status.textContent = checkedCount + ' / ' + MAX + ' selected';
+    checkboxes.forEach(c => {
+      const atCap = checkedCount >= MAX && !c.cb.checked;
+      c.cb.disabled = atCap;
+      c.row.classList.toggle('disabled', atCap);
+    });
+  }
+  checkboxes.forEach(c => c.cb.addEventListener('change', refreshCap));
+
+  const actions = document.createElement('div');
+  actions.className = 'picker-actions';
+  const sendNow = document.createElement('button');
+  sendNow.className = 'btn-send';
+  sendNow.textContent = 'Send';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-cancel';
+  cancel.textContent = 'Cancel';
+  actions.appendChild(sendNow);
+  actions.appendChild(cancel);
+  actions.appendChild(status);
+  picker.appendChild(actions);
+
+  pane.chatEl.appendChild(picker);
+  scrollPane(pane, true);
+
+  sendNow.addEventListener('click', () => {
+    const selectedIds = checkboxes.filter(c => c.cb.checked).map(c => c.cb.value);
+    picker.remove();
+    finalizeSend(pane, text, selectedIds);
+  });
+  cancel.addEventListener('click', () => {
+    picker.remove();
+    pane.inputEl.disabled = false;
+    pane.sendBtnEl.disabled = false;
+    pane.inputEl.value = text;
+    pane.inputEl.focus();
+  });
+}
+
+function finalizeSend(pane, text, selectedIds) {
+  const context = [{ source: 'skill_selection', content: '' }];
+  for (const id of selectedIds) {
+    context.push({ source: 'selected_skill', content: id });
+  }
+
+  pane.state.stickToBottom = true;
+  addMsg(pane, text, 'user');
+  scrollPane(pane, true);
+  pane.ws.send(JSON.stringify({ type: 'user_message', content: text, context }));
+  pane.inputEl.value = '';
+  pane.inputEl.style.height = 'auto';
+  pane.inputEl.disabled = true;
+  pane.sendBtnEl.disabled = true;
+  pane.state.currentAssistantMsg = null;
+  pane.state.currentAssistantRaw = '';
+  pane.state.currentThinkingBlock = null;
+  pane.state.currentThinkingBody = null;
+  pane.state.isThinking = false;
+  pane.state.proxyCards.clear();
+  pane.state.busy = true;
+}
+
+// ---------- Fork dialog ----------
+
+function openForkDialog(pane) {
+  if (pane.state.forkSelection.length === 0) return;
+  if (panes.size >= MAX_PANES) {
+    alert('已达到最大分栏数 (' + MAX_PANES + ')，请先关闭一个分栏。');
+    return;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'fork-dialog-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'fork-dialog';
+  overlay.appendChild(dialog);
+
+  const header = document.createElement('div');
+  header.className = 'fd-header';
+  header.textContent = '开 fork — 聚焦投资 (from ' + pane.paneId + ')';
+  dialog.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'fd-body';
+  dialog.appendChild(body);
+
+  // --- Selected units ---
+  const unitsLabel = document.createElement('div');
+  unitsLabel.className = 'fd-section-label';
+  unitsLabel.textContent = 'Selected context (' + pane.state.forkSelection.length + ' items)';
+  body.appendChild(unitsLabel);
+
+  const unitsList = document.createElement('div');
+  unitsList.className = 'fd-selected-list';
+  body.appendChild(unitsList);
+
+  // Local mutable copy so the operator can remove items in-dialog without
+  // touching the underlying pane selection until they commit.
+  const units = pane.state.forkSelection.slice();
+
+  function rerenderUnits() {
+    unitsList.innerHTML = '';
+    units.forEach((u, idx) => {
+      const row = document.createElement('div');
+      row.className = 'fd-unit';
+      const kind = document.createElement('span');
+      kind.className = 'fd-kind';
+      kind.textContent = u.kind;
+      const content = document.createElement('div');
+      content.className = 'fd-content';
+      content.textContent = (u.content || '').slice(0, 800);
+      if ((u.content || '').length > 800) content.textContent += '…';
+      const remove = document.createElement('button');
+      remove.className = 'fd-remove';
+      remove.textContent = '×';
+      remove.title = 'Remove from selection';
+      remove.addEventListener('click', () => {
+        units.splice(idx, 1);
+        rerenderUnits();
+      });
+      row.append(kind, content, remove);
+      unitsList.appendChild(row);
+    });
+    unitsLabel.textContent = 'Selected context (' + units.length + ' items)';
+  }
+  rerenderUnits();
+
+  // --- Task input ---
+  const taskLabel = document.createElement('div');
+  taskLabel.className = 'fd-section-label';
+  taskLabel.textContent = 'Fork task (one line — be specific)';
+  body.appendChild(taskLabel);
+
+  const taskInput = document.createElement('input');
+  taskInput.type = 'text';
+  taskInput.className = 'fd-task';
+  taskInput.placeholder = '例如：调查 etl_user 在过去 1 小时的活动并解释为何处于 IDLE IN TRANSACTION';
+  body.appendChild(taskInput);
+
+  // --- Deliverable radio ---
+  const delivLabel = document.createElement('div');
+  delivLabel.className = 'fd-section-label';
+  delivLabel.textContent = 'Expected deliverable';
+  body.appendChild(delivLabel);
+
+  const delivGroup = document.createElement('div');
+  delivGroup.className = 'fd-deliverable';
+  const radioName = 'deliverable-' + pane.paneId + '-' + Date.now();
+  const options = [
+    { value: 'conclusion', label: 'Conclusion only — one short paragraph, no evidence list' },
+    { value: 'evidence', label: 'Evidence list only — bullets, no standalone conclusion' },
+    { value: 'both', label: 'Both — one-paragraph conclusion + bulleted evidence (default)' },
+  ];
+  for (const opt of options) {
+    const l = document.createElement('label');
+    const r = document.createElement('input');
+    r.type = 'radio';
+    r.name = radioName;
+    r.value = opt.value;
+    if (opt.value === 'both') r.checked = true;
+    l.appendChild(r);
+    l.appendChild(document.createTextNode(' ' + opt.label));
+    delivGroup.appendChild(l);
+  }
+  body.appendChild(delivGroup);
+
+  // --- Footer ---
+  const footer = document.createElement('div');
+  footer.className = 'fd-footer';
+  const errorEl = document.createElement('span');
+  errorEl.className = 'fd-error';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-cancel';
+  cancelBtn.textContent = 'Cancel';
+  const startBtn = document.createElement('button');
+  startBtn.className = 'btn-start';
+  startBtn.textContent = 'Start fork';
+  footer.append(errorEl, cancelBtn, startBtn);
+  dialog.appendChild(footer);
+
+  function close() { overlay.remove(); }
+  cancelBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(); });
+
+  startBtn.addEventListener('click', async () => {
+    const task = taskInput.value.trim();
+    if (!task) { errorEl.textContent = 'Task description is required.'; return; }
+    const deliverable = delivGroup.querySelector('input[type=radio]:checked').value;
+    errorEl.textContent = '';
+    startBtn.disabled = true;
+    startBtn.textContent = 'Starting...';
+    try {
+      const resp = await authFetch('/api/sessions/fork', {
+        method: 'POST',
+        body: JSON.stringify({
+          parent_session_id: pane.sessionId,
+          selected_units: units.map(u => ({ kind: u.kind, content: u.content })),
+          task,
+          deliverable,
+        }),
+      });
+      if (resp.status === 401) { logout(); return; }
+      if (!resp.ok) {
+        const txt = await resp.text();
+        errorEl.textContent = 'Server error: ' + txt;
+        startBtn.disabled = false;
+        startBtn.textContent = 'Start fork';
+        return;
+      }
+      const data = await resp.json();
+      const forkPane = createPane({
+        role: 'fork',
+        sessionId: data.session_id,
+        parentPaneId: pane.paneId,
+        title: 'Fork: ' + task.slice(0, 40) + (task.length > 40 ? '…' : ''),
+        forkTask: task,
+      });
+      if (!forkPane) {
+        startBtn.disabled = false;
+        startBtn.textContent = 'Start fork';
+        return;
+      }
+      connectPaneWebSocket(forkPane);
+
+      // Clear the parent's fork selection now that it's been spent.
+      for (const u of pane.state.forkSelection) {
+        u.el.classList.remove('unit-fork-selected');
+      }
+      pane.state.forkSelection = [];
+      refreshAllForkButtonAvailability();
+      close();
+    } catch (e) {
+      errorEl.textContent = 'Request failed: ' + e.message;
+      startBtn.disabled = false;
+      startBtn.textContent = 'Start fork';
+    }
+  });
+
+  document.body.appendChild(overlay);
+  setTimeout(() => taskInput.focus(), 50);
+}
+
+// ---------- Fork → parent absorption ----------
+
+function sendForkResultToParent(forkPane) {
+  if (!forkPane.state.lastAssistantText) {
+    alert('Fork 还没有完成的回答可以发送。');
+    return;
+  }
+  const parentPane = panes.get(forkPane.parentPaneId);
+  if (!parentPane) {
+    alert('父分栏已关闭，无法回送结果。');
+    return;
+  }
+  if (!parentPane.ws || parentPane.ws.readyState !== WebSocket.OPEN) {
+    alert('父分栏的 WebSocket 已断开。');
+    return;
+  }
+  if (parentPane.state.busy) {
+    alert('父分栏正在生成回复，请等它完成后再回送。');
+    return;
+  }
+
+  const summaryText = forkPane.state.lastAssistantText;
+  const task = forkPane.forkTask || '';
+
+  const attachment = {
+    source: 'fork_summary',
+    content: summaryText,
+    metadata: {
+      task,
+      from_fork: forkPane.sessionId,
+    },
+  };
+  // Empty content — the fork report itself IS the payload; service.rs will
+  // splice it into user_text via the FORK_SUMMARY_SOURCE harvest.
+  parentPane.ws.send(JSON.stringify({
+    type: 'user_message',
+    content: '',
+    context: [attachment],
+  }));
+
+  // Render an inline marker in BOTH panes so the operator sees what happened.
+  addMsg(parentPane, '↩ Fork result absorbed → parent\'s next turn will use it.\nTask: ' + task, 'fork-note', { forkable: false });
+  addMsg(forkPane, '↩ Result sent to parent.', 'system', { forkable: false });
+
+  // Parent enters "busy" state — its LLM is about to stream a turn.
+  parentPane.state.busy = true;
+  parentPane.inputEl.disabled = true;
+  parentPane.sendBtnEl.disabled = true;
+  parentPane.state.currentAssistantMsg = null;
+  parentPane.state.currentAssistantRaw = '';
+  parentPane.state.proxyCards.clear();
+
+  // Forks usually have nothing more to add after they've handed back the
+  // answer — disable the send-back button so the operator doesn't double-fire.
+  forkPane.sendParentBtn.disabled = true;
+}
+
+// ---------- Bootstrap ----------
+
+async function createParentSession() {
+  if (!checkAuth()) return;
+  try {
+    const cfgResp = await authFetch('/api/config');
+    if (cfgResp.status === 401) { logout(); return; }
+    const cfg = await cfgResp.json();
+    if (!cfg.has_api_key) {
+      setStatus('No API key configured', 'error');
+      const parentPane = createPane({ role: 'parent', sessionId: 'pending' });
+      if (parentPane) {
+        addMsg(parentPane, 'No LLM provider configured. Go to Settings to configure your API key and model.', 'system', { forkable: false });
+        const link = document.createElement('div');
+        link.className = 'msg system';
+        link.innerHTML = '<a href="/static/settings.html" style="color: #4ecca3;">Open Settings</a>';
+        parentPane.chatEl.appendChild(link);
+      }
+      return;
+    }
+  } catch (e) {
+    setStatus('Failed to check config: ' + e.message, 'error');
+    return;
+  }
+  await loadSessions();
+  if (sessions.length > 0) {
+    await switchSession(sessions[0].session_id);
+  } else {
+    await createNewSession();
+  }
+}
+
+toggleHistoryBtn.addEventListener('click', () => {
+  const on = document.body.classList.toggle('show-proxy-history');
+  toggleHistoryBtn.classList.toggle('active', on);
+  toggleHistoryBtn.textContent = on ? 'Hide proxy history' : 'Show proxy history';
+});
+
+document.getElementById('logout-btn').addEventListener('click', logout);
+
+if (checkAuth()) createParentSession();
+</script>
 </body>
 </html>

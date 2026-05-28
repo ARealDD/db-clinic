@@ -15,3 +15,12 @@ gateway_prefix = "gateway"
 # self-prune; we accept this for now and document it). Python side: enforced
 # via TimedRotatingFileHandler's backupCount.
 retention_days = 14
+
+# Per-turn full-prompt JSONL log. One record per `run_turn` invocation on the
+# Rust side (after system-prompt merge + skill-context augmentation), and one
+# record per `user_message` WebSocket frame on the Python side (raw operator
+# input + context attachments). Both records carry `session_id` so they can
+# be reunited with `jq -s 'group_by(.session_id)'`.
+prompt_log_dir = "logs/prompts"
+prompt_log_prefix_grpc = "prompt-grpc"
+prompt_log_prefix_gateway = "prompt-gateway"

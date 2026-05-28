@@ -33,4 +33,11 @@ class LLMConfig(BaseModel):
     api_key: str = ""
     base_url: str = ""
     model: str = ""
-    system_prompt: str = "You are a database diagnosis assistant."
+    # Three-segment system prompt. The Rust kernel receives these as
+    # `repeated string system_prompts` (in this order: role, background,
+    # rules) and then appends its own TOOL_USAGE_GUIDANCE. Empty segments
+    # are dropped before transmission so the operator sees no spurious
+    # `\n\n` separators in the JSONL prompt log.
+    system_prompt_role: str = "You are a database diagnosis assistant."
+    system_prompt_background: str = ""
+    system_prompt_rules: str = ""
