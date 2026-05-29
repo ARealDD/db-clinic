@@ -155,7 +155,11 @@ export default function Settings() {
       }
 
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${location.host}/ws/chat/${session.session_id}`);
+      const token = localStorage.getItem('db_clinic_token') || '';
+      const wsUrl = token
+        ? `${protocol}//${location.host}/ws/chat/${session.session_id}?token=${encodeURIComponent(token)}`
+        : `${protocol}//${location.host}/ws/chat/${session.session_id}`;
+      const ws = new WebSocket(wsUrl);
 
       let responded = false;
       ws.onopen = () => ws.send(JSON.stringify({ type: 'user_message', content: 'Hello, reply with a single word: working.' }));
