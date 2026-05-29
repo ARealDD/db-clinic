@@ -59,7 +59,8 @@ type Action =
   | { type: 'add_user_message'; content: string }
   | { type: 'set_input_enabled' }
   | { type: 'set_messages'; messages: ChatState['messages'] }
-  | { type: 'clear_chat' };
+  | { type: 'clear_chat' }
+  | { type: 'expire_all_proxy_instructions' };
 
 let msgCounter = 0;
 const newId = () => `msg-${++msgCounter}`;
@@ -142,6 +143,14 @@ function chatReducer(state: ChatState, action: Action): ChatState {
         ...state,
         inputDisabled: !action.recoverable,
         messages: [...state.messages, { id: newId(), role: 'system', content: `❌ **Error:** ${action.message}` }],
+      };
+
+    case 'expire_all_proxy_instructions':
+      return {
+        ...state,
+        proxyInstructions: state.proxyInstructions.map((pi) =>
+          pi.status === 'active' ? { ...pi, status: 'expired' as const } : pi
+        ),
       };
 
     case 'set_input_enabled':
@@ -414,14 +423,7 @@ export default function Chat() {
         // Expire all active proxy instructions on proxy-related errors
         // so the user knows to retry with a fresh message.
         if (msg.message.includes('proxy instruction') || msg.message.includes('pending proxy')) {
-          state.proxyInstructions.forEach((pi) => {
-            if (pi.status === 'active') {
-              dispatch({
-                type: 'proxy_instruction',
-                payload: { ...pi, status: 'expired' as const },
-              });
-            }
-          });
+          dispatch({ type: 'expire_all_proxy_instructions' });
         }
         break;
       case 'usage_update':

@@ -662,6 +662,13 @@ async def session_history(
                             continue
                     content = "\n".join(text_parts)
                     if content:
+                        # Strip Rust-injected skill context prefix from user messages
+                        if role == "user" and content.startswith("[Matched Diagnostic Skills]"):
+                            end_marker = "[End of Matched Skills]"
+                            end_idx = content.find(end_marker)
+                            if end_idx >= 0:
+                                sep = "\n\n---\n\n"
+                                content = content[end_idx + len(end_marker) + len(sep):]
                         messages.append({"role": role, "content": content})
     except Exception as e:
         log.error("failed to read session history for %s: %s", session_id, e)

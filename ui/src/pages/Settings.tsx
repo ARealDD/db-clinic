@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useUser } from '../context/UserContext';
@@ -59,6 +59,8 @@ export default function Settings() {
   const [status, setStatus] = useState('');
   const [statusOk, setStatusOk] = useState(false);
   const [activePreset, setActivePreset] = useState('');
+  const [testing, setTesting] = useState(false);
+  const testRef = useRef<{ ws: WebSocket | null; timer: ReturnType<typeof setTimeout> | null }>({ ws: null, timer: null });
 
   useEffect(() => {
     if (!user) return;
@@ -75,6 +77,14 @@ export default function Settings() {
       })
       .catch(() => {});
   }, [user]);
+
+  // Cleanup WebSocket and timer on unmount
+  useEffect(() => {
+    return () => {
+      testRef.current.timer && clearTimeout(testRef.current.timer);
+      testRef.current.ws?.close();
+    };
+  }, []);
 
   const selectPreset = (p: Preset) => {
     setProvider(p.provider);
@@ -139,8 +149,14 @@ export default function Settings() {
 
   const testConnection = async () => {
     if (!apiKey || !model) { setStatus('Save configuration first.'); setStatusOk(false); return; }
+    if (testing) return;
+    setTesting(true);
     setStatus('Testing connection...');
     setStatusOk(true);
+
+    // Cleanup previous run
+    testRef.current.timer && clearTimeout(testRef.current.timer);
+    testRef.current.ws?.close();
 
     try {
       await api('/api/config', {
@@ -151,6 +167,7 @@ export default function Settings() {
       const session = await api<{ session_id: string }>('/api/sessions', { method: 'POST' });
       if (!session.session_id) {
         setStatus('Failed to create session'); setStatusOk(false);
+        setTesting(false);
         return;
       }
 
@@ -160,6 +177,14 @@ export default function Settings() {
         ? `${protocol}//${location.host}/ws/chat/${session.session_id}?token=${encodeURIComponent(token)}`
         : `${protocol}//${location.host}/ws/chat/${session.session_id}`;
       const ws = new WebSocket(wsUrl);
+      testRef.current.ws = ws;
+
+      const cleanup = () => {
+        setTesting(false);
+        testRef.current.ws = null;
+        testRef.current.timer && clearTimeout(testRef.current.timer);
+        testRef.current.timer = null;
+      };
 
       let responded = false;
       ws.onopen = () => ws.send(JSON.stringify({ type: 'user_message', content: 'Hello, reply with a single word: working.' }));
@@ -171,30 +196,37 @@ export default function Settings() {
           setStatus('Connection successful! LLM responded.');
           setStatusOk(true);
           ws.close();
+          cleanup();
           api(`/api/sessions/${session.session_id}`, { method: 'DELETE' }).catch(() => {});
         } else if (msg.type === 'error' && !responded) {
           responded = true;
           setStatus(`LLM error: ${msg.message}`); setStatusOk(false);
           ws.close();
+          cleanup();
           api(`/api/sessions/${session.session_id}`, { method: 'DELETE' }).catch(() => {});
         } else if (msg.type === 'turn_complete' && !responded) {
           responded = true;
           setStatus('Turn completed but no text received.'); setStatusOk(false);
           ws.close();
+          cleanup();
           api(`/api/sessions/${session.session_id}`, { method: 'DELETE' }).catch(() => {});
         }
       };
       ws.onerror = () => { if (!responded) { setStatus('WebSocket connection error.'); setStatusOk(false); } };
-      setTimeout(() => {
+      ws.onclose = () => { if (!responded) { setStatus('Connection closed unexpectedly'); setStatusOk(false); cleanup(); } };
+      testRef.current.timer = setTimeout(() => {
         if (!responded) {
+          responded = true;
           setStatus('Timeout — no response within 15s.'); setStatusOk(false);
           ws.close();
+          cleanup();
           api(`/api/sessions/${session.session_id}`, { method: 'DELETE' }).catch(() => {});
         }
       }, 15000);
     } catch (e) {
       setStatus(`Error: ${e instanceof Error ? e.message : 'test failed'}`);
       setStatusOk(false);
+      setTesting(false);
     }
   };
 
@@ -425,12 +457,12 @@ export default function Settings() {
             }}>
             Save Configuration
           </button>
-          <button onClick={testConnection}
+          <button onClick={testConnection} disabled={testing}
             style={{
-              padding: '10px 24px', border: 'none', borderRadius: 8, cursor: 'pointer',
-              fontSize: 14, fontWeight: 600, background: 'var(--border)', color: 'var(--text-primary)',
+              padding: '10px 24px', border: 'none', borderRadius: 8, cursor: testing ? 'default' : 'pointer',
+              fontSize: 14, fontWeight: 600, background: testing ? '#555' : 'var(--border)', color: 'var(--text-primary)',
             }}>
-            Test Connection
+            {testing ? 'Testing...' : 'Test Connection'}
           </button>
         </div>
 
