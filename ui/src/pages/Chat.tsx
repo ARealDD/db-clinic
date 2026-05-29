@@ -7,6 +7,7 @@ import ProxyCard from '../components/ProxyCard';
 import ToolSidebar, { type ToolEntryData } from '../components/ToolSidebar';
 import SkillSidebar from '../components/SkillSidebar';
 import SkillSelectorModal from '../components/SkillSelectorModal';
+import SkillPickerModal from '../components/SkillPickerModal';
 import SessionSidebar from '../components/SessionSidebar';
 import type { LLMConfig, WsServerMessage, Session } from '../types';
 
@@ -232,6 +233,7 @@ export default function Chat() {
   const [skillSidebarVisible, setSkillSidebarVisible] = useState(false);
   const [skillSelectorOpen, setSkillSelectorOpen] = useState(false);
   const [skillCount, setSkillCountLocal] = useState(0);
+  const [pendingSkills, setPendingSkills] = useState<MatchedSkill[] | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const loadingRef = useRef(false);
@@ -442,6 +444,7 @@ export default function Chat() {
         break;
       case 'skill_match':
         dispatch({ type: 'skill_match', skills: msg.skills });
+        setPendingSkills(msg.skills);
         break;
       case 'tool_execution':
         dispatch({
@@ -522,6 +525,16 @@ export default function Chat() {
     }
   };
 
+  const handleSkillConfirm = (ids: string[]) => {
+    ws.send({ type: 'skill_selection', skill_ids: ids });
+    setPendingSkills(null);
+  };
+
+  const handleSkillCancel = () => {
+    ws.send({ type: 'skill_selection', skill_ids: [] });
+    setPendingSkills(null);
+  };
+
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
     e.target.style.height = 'auto';
@@ -598,8 +611,9 @@ export default function Chat() {
           }}>
             技能 {state.skillCount || skillCount}
           </button>
-          <button onClick={() => setSkillSelectorOpen(true)} style={{
-            background: 'none', border: 'none', color: 'var(--link)', cursor: 'pointer',
+          <button onClick={() => setSkillSelectorOpen(true)} disabled={state.inputDisabled} style={{
+            background: 'none', border: 'none', color: state.inputDisabled ? 'var(--text-muted)' : 'var(--link)',
+            cursor: state.inputDisabled ? 'not-allowed' : 'pointer',
             fontSize: 13, textDecoration: 'underline', padding: 0,
           }}>
             选择
@@ -714,8 +728,16 @@ export default function Chat() {
         onToggle={() => setToolSidebarVisible((v) => !v)}
       />
 
-      {/* Skill selector */}
+      {/* Skill selector (square) */}
       <SkillSelectorModal open={skillSelectorOpen} onClose={() => { setSkillSelectorOpen(false); loadSkillCount(); }} />
+
+      {/* Skill picker (match results) */}
+      <SkillPickerModal
+        open={pendingSkills !== null}
+        skills={pendingSkills || []}
+        onConfirm={handleSkillConfirm}
+        onCancel={handleSkillCancel}
+      />
     </div>
   );
 }

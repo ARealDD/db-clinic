@@ -163,4 +163,5 @@ export type WsServerMessage =
 export type WsClientMessage =
   | { type: 'user_message'; content: string }
   | { type: 'cancel' }
-  | { type: 'proxy_result'; instruction_id: string; tool_use_id: string; output: string; is_error: boolean };
+  | { type: 'proxy_result'; instruction_id: string; tool_use_id: string; output: string; is_error: boolean }
+  | { type: 'skill_selection'; skill_ids: string[] };

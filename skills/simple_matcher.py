@@ -121,7 +121,81 @@ class SimpleSkillMatcher:
                 score += 0.5
         return score
 
-    def build_context(self, matched: list[MatchedSkill]) -> str:
+    def match_by_ids(
+        self, user_message: str, skill_ids: set[str], top_k: int = 5
+    ) -> list[MatchedSkill]:
+        """Match only skills whose IDs are in the provided set (active skills)."""
+        context = _normalize(user_message)
+        results: list[MatchedSkill] = []
+
+        for skill in self._case_registry.all():
+            if skill.id not in skill_ids:
+                continue
+            score = self._score_case_skill(skill, context)
+            if score > 0:
+                results.append(MatchedSkill(
+                    skill_id=skill.id,
+                    skill_name=skill.name,
+                    category=skill.category,
+                    score=score,
+                    skill_type="case",
+                ))
+
+        for skill in self._knowledge_registry.all():
+            if skill.id not in skill_ids:
+                continue
+            score = self._score_knowledge_skill(skill, context)
+            if score > 0:
+                results.append(MatchedSkill(
+                    skill_id=skill.id,
+                    skill_name=skill.name,
+                    category=skill.category,
+                    score=score,
+                    skill_type="knowledge",
+                ))
+
+        results.sort(key=lambda s: s.score, reverse=True)
+        return results[:top_k]
+
+    @staticmethod
+    def score_skill_from_metadata(metadata: dict, context: str) -> float:
+        """Score a DB-only (UUID) skill by its metadata dict."""
+        score = 0.0
+        for kw in metadata.get("keywords", []):
+            if _normalize(kw) in context:
+                score += 2.0
+        for symptom in metadata.get("symptoms", []):
+            words = re.findall(r"\w{3,}", _normalize(symptom))
+            if sum(1 for w in words if w in context) >= 2:
+                score += 1.5
+        for trigger in metadata.get("triggers", []):
+            try:
+                if re.search(trigger, context, re.IGNORECASE):
+                    score += 3.0
+            except re.error:
+                pass
+        cat_hints = _CATEGORY_HINTS.get(metadata.get("category", ""), [])
+        for hint in cat_hints:
+            if hint in context:
+                score += 1.0
+                break
+        return score
+
+    def build_context(
+        self,
+        matched: list[MatchedSkill] | None = None,
+        *,
+        selected_ids: list[str] | None = None,
+        db_skills_map: dict[str, dict] | None = None,
+    ) -> str:
+        """Build skill context string.
+
+        Two calling conventions (mutually exclusive):
+        1. Pass ``matched`` (list of MatchedSkill from match/match_by_ids).
+        2. Pass ``selected_ids`` + ``db_skills_map`` for raw ID-based lookup.
+        """
+        if selected_ids is not None:
+            return self._build_context_from_ids(selected_ids, db_skills_map or {})
         if not matched:
             return ""
 
@@ -132,11 +206,55 @@ class SimpleSkillMatcher:
                 if skill:
                     lines.append(skill.to_prompt_context(detail_level="full"))
                     lines.append("")
+                    continue
             else:
                 skill = self._knowledge_registry.get(m.skill_id)
                 if skill:
                     lines.append(skill.to_prompt_context())
                     lines.append("")
+                    continue
+            # Fallback: DB-only skill (UUID)
+            if db_skills_map and m.skill_id in db_skills_map:
+                dbs = db_skills_map[m.skill_id]
+                lines.append(f"## Skill: {dbs.get('name', m.skill_id)}")
+                lines.append(f"Category: {dbs.get('category', 'general')}")
+                lines.append(f"Description: {dbs.get('description', '')}")
+                lines.append("")
+                if dbs.get("content"):
+                    lines.append(dbs["content"])
+                lines.append("")
 
+        lines.append("[End of Matched Skills]")
+        return "\n".join(lines)
+
+    def _build_context_from_ids(
+        self,
+        selected_ids: list[str],
+        db_skills_map: dict[str, dict],
+    ) -> str:
+        """Build context from raw skill IDs (after user picks skills)."""
+        if not selected_ids:
+            return ""
+        lines = ["[Matched Diagnostic Skills]", ""]
+        for sid in selected_ids:
+            skill = self._case_registry.get(sid)
+            if skill:
+                lines.append(skill.to_prompt_context(detail_level="full"))
+                lines.append("")
+                continue
+            kskill = self._knowledge_registry.get(sid)
+            if kskill:
+                lines.append(kskill.to_prompt_context())
+                lines.append("")
+                continue
+            if sid in db_skills_map:
+                dbs = db_skills_map[sid]
+                lines.append(f"## Skill: {dbs.get('name', sid)}")
+                lines.append(f"Category: {dbs.get('category', 'general')}")
+                lines.append(f"Description: {dbs.get('description', '')}")
+                lines.append("")
+                if dbs.get("content"):
+                    lines.append(dbs["content"])
+                lines.append("")
         lines.append("[End of Matched Skills]")
         return "\n".join(lines)

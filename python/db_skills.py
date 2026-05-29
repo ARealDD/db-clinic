@@ -248,6 +248,33 @@ def clone_skill(skill_id: str, user_id: int) -> Optional[str]:
         return new_id
 
 
+def get_skills_by_ids(ids: list[str]) -> Dict[str, Dict[str, Any]]:
+    """Load skills by ID list, returns dict keyed by skill_id.
+
+    Used to fetch DB-only (UUID) skills for context building.
+    """
+    if not ids:
+        return {}
+    db = _get_db()
+    placeholders = ",".join("?" for _ in ids)
+    with _DB_SKILLS_LOCK:
+        cur = db.execute(
+            f"SELECT id, name, description, content, metadata FROM skills WHERE id IN ({placeholders})",
+            ids,
+        )
+        result = {}
+        for row in cur.fetchall():
+            d = dict(row)
+            meta = d.pop("metadata")
+            if meta:
+                try:
+                    d.update(json.loads(meta))
+                except json.JSONDecodeError:
+                    pass
+            result[d["id"]] = d
+        return result
+
+
 def toggle_active(skill_id: str, user_id: int) -> bool:
     db = _get_db()
     with _DB_SKILLS_LOCK:

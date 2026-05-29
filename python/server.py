@@ -943,6 +943,99 @@ async def admin_delete_user(
     return {"ok": True}
 
 
+# ---------- Skill matching (Python-side) ----------
+
+_MATCHER = None
+_MATCHER_INIT_LOCK = threading.Lock()
+
+
+def _get_matcher():
+    global _MATCHER
+    if _MATCHER is None:
+        with _MATCHER_INIT_LOCK:
+            if _MATCHER is None:
+                from skills.registry import SkillRegistry, KnowledgeSkillRegistry
+                from skills.simple_matcher import SimpleSkillMatcher
+                skills_dir = os.path.join(_PROJECT_ROOT, "skills")
+                case_reg = SkillRegistry(os.path.join(skills_dir, "case"))
+                knowledge_reg = KnowledgeSkillRegistry(os.path.join(skills_dir, "knowledge"))
+                _MATCHER = SimpleSkillMatcher(case_reg, knowledge_reg)
+    return _MATCHER
+
+
+async def _build_skill_context(user_id: int, message: str) -> Optional[Dict[str, Any]]:
+    """Score ALL active skills against message, return them all with scores.
+
+    Returns dict with:
+      - skills: list of dicts for frontend (id, name, category, score, type)
+      - db_skills_map: dict of UUID skill data loaded from DB
+    """
+    from skills.simple_matcher import _normalize, SimpleSkillMatcher
+
+    active_ids = await asyncio.to_thread(db_skills.get_user_active_ids, user_id)
+    if not active_ids:
+        return None
+    active_set = set(active_ids)
+
+    matcher = _get_matcher()
+    context = _normalize(message)
+
+    skills_list: list[dict] = []
+
+    # Score ALL active file-registry skills (score may be 0 — still included)
+    for skill in matcher._case_registry.all():
+        if skill.id in active_set:
+            score = matcher._score_case_skill(skill, context)
+            skills_list.append({
+                "id": skill.id, "name": skill.name,
+                "category": skill.category, "score": round(score, 1),
+                "type": "case",
+            })
+
+    for skill in matcher._knowledge_registry.all():
+        if skill.id in active_set:
+            score = matcher._score_knowledge_skill(skill, context)
+            skills_list.append({
+                "id": skill.id, "name": skill.name,
+                "category": skill.category, "score": round(score, 1),
+                "type": "knowledge",
+            })
+
+    # Find UUID-only skills (not in file registries)
+    all_registry_ids: set[str] = set()
+    for s in matcher._case_registry.all():
+        all_registry_ids.add(s.id)
+    for s in matcher._knowledge_registry.all():
+        all_registry_ids.add(s.id)
+    uuid_ids = [sid for sid in active_ids if sid not in all_registry_ids]
+
+    db_skills_map = {}
+    if uuid_ids:
+        db_skills_map = await asyncio.to_thread(db_skills.get_skills_by_ids, uuid_ids)
+        for sid, skill_data in db_skills_map.items():
+            meta = {
+                k: skill_data.get(k, []) if isinstance(skill_data.get(k, []), list) else []
+                for k in ("keywords", "symptoms", "triggers")
+            }
+            meta["category"] = skill_data.get("category", "")
+            score = SimpleSkillMatcher.score_skill_from_metadata(meta, context)
+            skills_list.append({
+                "id": sid,
+                "name": skill_data.get("name", sid),
+                "category": skill_data.get("category", "general"),
+                "score": round(score, 1),
+                "type": "case",
+            })
+
+    # Sort by score descending so highest-matched appear first
+    skills_list.sort(key=lambda s: s["score"], reverse=True)
+
+    return {
+        "skills": skills_list,
+        "db_skills_map": db_skills_map,
+    }
+
+
 # ---------- WebSocket chat ----------
 
 class _ChatInputIterator:
@@ -1123,6 +1216,8 @@ async def ws_chat(ws: WebSocket, session_id: str):
 
     send_task = asyncio.create_task(send_loop())
 
+    pending_user_message = None  # Holds content while waiting for skill_selection
+
     try:
         while True:
             data = await ws.receive_json()
@@ -1146,6 +1241,18 @@ async def ws_chat(ws: WebSocket, session_id: str):
                     )
                 except Exception:
                     log.exception("prompt logging failed for session %s", session_id)
+
+                # --- Skill matching (Python-side) ---
+                match_result = await _build_skill_context(int(user_id), content)
+                if match_result:
+                    await ws.send_json({"type": "skill_match", "skills": match_result["skills"]})
+                    pending_user_message = {
+                        "content": content,
+                        "db_skills_map": match_result["db_skills_map"],
+                    }
+                    continue  # Wait for skill_selection before sending to gRPC
+
+                # --- No matching skills: pass through to gRPC ---
                 proto_attachments = []
                 for a in context_attachments:
                     raw_meta = a.get("metadata") or {}
@@ -1166,7 +1273,51 @@ async def ws_chat(ws: WebSocket, session_id: str):
                     agent_pb2.UserMessage(content=content, context=proto_attachments)
                 )
                 input_iter.put(chat_input)
+            elif msg_type == "skill_selection":
+                if pending_user_message is None:
+                    await ws.send_json({"type": "error", "message": "unexpected skill_selection, no pending message"})
+                    continue
+                selected_ids = data.get("skill_ids", [])
+                original_content = pending_user_message["content"]
+                db_skills_map = pending_user_message["db_skills_map"]
+
+                matcher = _get_matcher()
+                context = matcher.build_context(
+                    selected_ids=selected_ids,
+                    db_skills_map=db_skills_map,
+                )
+                content = f"{context}\n\n---\n\n{original_content}" if context else original_content
+                context_attachments = [{"source": "skill_selection", "content": ""}]
+
+                proto_attachments = []
+                for a in context_attachments:
+                    raw_meta = a.get("metadata") or {}
+                    meta = {
+                        str(k): str(v)
+                        for k, v in raw_meta.items()
+                        if v is not None
+                    } if isinstance(raw_meta, dict) else {}
+                    proto_attachments.append(
+                        agent_pb2.ContextAttachment(
+                            source=str(a.get("source", "")),
+                            content=str(a.get("content", "")),
+                            metadata=meta,
+                        )
+                    )
+
+                log.info(
+                    "session %s: skill_selection ids=%d context_len=%d",
+                    session_id, len(selected_ids), len(context),
+                )
+
+                chat_input = agent_pb2.ChatInput(session_id=session_id)
+                chat_input.user_message.CopyFrom(
+                    agent_pb2.UserMessage(content=content, context=proto_attachments)
+                )
+                input_iter.put(chat_input)
+                pending_user_message = None
             elif msg_type == "cancel":
+                pending_user_message = None
                 chat_input = agent_pb2.ChatInput(session_id=session_id)
                 chat_input.cancel.CopyFrom(agent_pb2.CancelTurn(reason="user cancelled"))
                 input_iter.put(chat_input)
