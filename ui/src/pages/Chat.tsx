@@ -226,11 +226,13 @@ export default function Chat() {
   }, []);
 
   // Load skill count
-  useEffect(() => {
+  const loadSkillCount = useCallback(() => {
     api<{ skills: unknown[]; active_ids: string[] }>('/api/skills/mine')
       .then((data) => setSkillCountLocal(data.active_ids.length))
       .catch(() => {});
   }, []);
+
+  useEffect(() => { loadSkillCount(); }, [loadSkillCount]);
 
   // When 'ready', load sessions and initialize
   useEffect(() => {
@@ -651,7 +653,7 @@ export default function Chat() {
       />
 
       {/* Skill selector */}
-      <SkillSelectorModal open={skillSelectorOpen} onClose={() => setSkillSelectorOpen(false)} />
+      <SkillSelectorModal open={skillSelectorOpen} onClose={() => { setSkillSelectorOpen(false); loadSkillCount(); }} />
     </div>
   );
 }
