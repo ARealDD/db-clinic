@@ -103,6 +103,28 @@ def get_user_active_ids(user_id: int) -> List[str]:
         return [r["skill_id"] for r in cur.fetchall()]
 
 
+def get_skill_count() -> int:
+    db = _get_db()
+    with _DB_SKILLS_LOCK:
+        return db.execute("SELECT COUNT(*) FROM skills").fetchone()[0]
+
+
+def create_official_skill(
+    skill_id: str,
+    name: str,
+    description: str,
+    content: str,
+    metadata: str,
+) -> None:
+    db = _get_db()
+    with _DB_SKILLS_LOCK:
+        db.execute(
+            "INSERT OR IGNORE INTO skills (id, name, description, content, metadata, owner_id, is_official, is_published) VALUES (?, ?, ?, ?, ?, 1, 1, 1)",
+            (skill_id, name, description, content, metadata),
+        )
+        db.commit()
+
+
 def get_square_skills(search: str = "", category: str = "") -> Dict[str, List[Dict[str, Any]]]:
     """Get official and published skills for the skill square."""
     db = _get_db()

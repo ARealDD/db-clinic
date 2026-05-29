@@ -154,6 +154,47 @@ async def _startup_init_db():
         _lg.propagate = True
     await db.init_db()
 
+    # Seed official skills from file system if DB is empty
+    try:
+        count = await asyncio.to_thread(db_skills.get_skill_count)
+        if count == 0:
+            from skills.registry import SkillRegistry, KnowledgeSkillRegistry
+            skills_dir = os.path.join(_PROJECT_ROOT, "skills")
+            case_reg = SkillRegistry(os.path.join(skills_dir, "case"))
+            knowledge_reg = KnowledgeSkillRegistry(os.path.join(skills_dir, "knowledge"))
+            seeded = 0
+            for skill in case_reg.all():
+                meta = json.dumps({
+                    "skill_type": "case",
+                    "category": skill.category,
+                    "keywords": skill.keywords,
+                    "triggers": skill.triggers,
+                    "symptoms": skill.symptoms,
+                    "tags": [],
+                })
+                await asyncio.to_thread(
+                    db_skills.create_official_skill,
+                    skill.id, skill.name, skill.description,
+                    skill.to_prompt_context(detail_level="full"), meta,
+                )
+                seeded += 1
+            for skill in knowledge_reg.all():
+                meta = json.dumps({
+                    "skill_type": "knowledge",
+                    "category": skill.category,
+                    "keywords": skill.keywords,
+                    "tags": skill.tags,
+                })
+                await asyncio.to_thread(
+                    db_skills.create_official_skill,
+                    skill.id, skill.name, skill.description,
+                    skill.to_prompt_context(), meta,
+                )
+                seeded += 1
+            log.info("seeded %d official skills from file system", seeded)
+    except Exception:
+        log.exception("failed to seed official skills")
+
     # Bootstrap admin user from environment variables
     admin_username = os.environ.get("ADMIN_USERNAME", "").strip()
     admin_password = os.environ.get("ADMIN_PASSWORD", "").strip()
