@@ -154,6 +154,31 @@ async def _startup_init_db():
         _lg.propagate = True
     await db.init_db()
 
+    # Bootstrap admin user from environment variables — MUST run before seeding
+    # official skills, because create_official_skill hardcodes owner_id=1.
+    admin_username = os.environ.get("ADMIN_USERNAME", "").strip()
+    admin_password = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if admin_username and admin_password:
+        hashed = auth_mod.hash_password(admin_password)
+        user_id = await db.create_user(admin_username, hashed)
+        if user_id is not None:
+            await db.set_user_role(user_id, "admin")
+            log.info("bootstrapped admin user: %s (id=%s)", admin_username, user_id)
+        else:
+            existing = await db.get_user_by_username(admin_username)
+            if existing:
+                await db.update_user_password(existing["id"], hashed)
+                if existing.get("role") != "admin":
+                    await db.set_user_role(existing["id"], "admin")
+                log.info("updated existing user to admin: %s (id=%s)", admin_username, existing["id"])
+    else:
+        # Ensure at least one user exists so skill seeding with owner_id=1 won't
+        # fail on the foreign-key constraint.
+        existing = await db.get_user_by_id(1)
+        if existing is None:
+            await db.create_user("system", "")
+            log.info("created system user for official skill ownership")
+
     # Seed official skills from file system if DB is empty
     try:
         count = await asyncio.to_thread(db_skills.get_skill_count)
@@ -194,23 +219,6 @@ async def _startup_init_db():
             log.info("seeded %d official skills from file system", seeded)
     except Exception:
         log.exception("failed to seed official skills")
-
-    # Bootstrap admin user from environment variables
-    admin_username = os.environ.get("ADMIN_USERNAME", "").strip()
-    admin_password = os.environ.get("ADMIN_PASSWORD", "").strip()
-    if admin_username and admin_password:
-        hashed = auth_mod.hash_password(admin_password)
-        user_id = await db.create_user(admin_username, hashed)
-        if user_id is not None:
-            await db.set_user_role(user_id, "admin")
-            log.info("bootstrapped admin user: %s (id=%s)", admin_username, user_id)
-        else:
-            existing = await db.get_user_by_username(admin_username)
-            if existing:
-                await db.update_user_password(existing["id"], hashed)
-                if existing.get("role") != "admin":
-                    await db.set_user_role(existing["id"], "admin")
-                log.info("updated existing user to admin: %s (id=%s)", admin_username, existing["id"])
 
 
 # ---------- Auth helpers ----------
