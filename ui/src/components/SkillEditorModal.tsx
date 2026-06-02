@@ -27,6 +27,51 @@ const TAB: React.CSSProperties = {
   borderBottom: '2px solid transparent',
 };
 
+/**
+ * Parse simple YAML frontmatter from a SKILL.md file.
+ * Returns extracted fields and the body markdown (without frontmatter).
+ */
+function parseFrontmatter(text: string): { fields: Record<string, any>; body: string } {
+  if (!text.startsWith('---')) {
+    return { fields: {}, body: text };
+  }
+  const end = text.indexOf('\n---', 3);
+  if (end === -1) {
+    return { fields: {}, body: text };
+  }
+  const yaml = text.slice(3, end);
+  const body = text.slice(end + 4).trim();
+
+  const fields: Record<string, any> = {};
+  let currentKey = '';
+  for (const line of yaml.split('\n')) {
+    const trimmed = line.trim();
+    // Array item
+    if (trimmed.startsWith('- ')) {
+      if (currentKey) {
+        if (!Array.isArray(fields[currentKey])) {
+          fields[currentKey] = [];
+        }
+        fields[currentKey].push(trimmed.slice(2));
+      }
+      continue;
+    }
+    // Key-value pair
+    const colonIdx = line.indexOf(':');
+    if (colonIdx !== -1) {
+      currentKey = line.slice(0, colonIdx).trim();
+      const value = line.slice(colonIdx + 1).trim();
+      if (value) {
+        fields[currentKey] = value.replace(/^["']|["']$/g, '');
+      } else {
+        fields[currentKey] = [];
+      }
+    }
+  }
+
+  return { fields, body };
+}
+
 export default function SkillEditorModal({ open, onClose, editSkill, onSaved }: SkillEditorModalProps) {
   const { user } = useUser();
   const [tab, setTab] = useState<'form' | 'upload'>('form');
@@ -63,7 +108,11 @@ export default function SkillEditorModal({ open, onClose, editSkill, onSaved }: 
     if (editSkill) {
       setName(editSkill.name);
       setDescription(editSkill.description);
-      setContent(editSkill.content);
+      // Strip frontmatter from content if present (e.g. skills uploaded before the fix)
+      const { body } = editSkill.content.startsWith('---')
+        ? parseFrontmatter(editSkill.content)
+        : { body: editSkill.content };
+      setContent(body);
       try {
         const meta = JSON.parse(editSkill.metadata || '{}');
         setSkillType((meta.skill_type as string) || 'case');
@@ -102,7 +151,23 @@ export default function SkillEditorModal({ open, onClose, editSkill, onSaved }: 
     const reader = new FileReader();
     reader.onload = () => {
       const text = reader.result as string;
-      setFilePreview(text);
+      // Parse YAML frontmatter and populate form fields
+      const { fields, body } = parseFrontmatter(text);
+
+      setName((fields.name as string) || file.name.replace(/\.(md|yaml|yml)$/, ''));
+      if (fields.skill_type) setSkillType(fields.skill_type as string);
+      if (fields.category) setCategory(fields.category as string);
+      if (fields.description) setDescription(fields.description as string);
+      if (fields.keywords) setKeywords((fields.keywords as string[]).join(', '));
+      if (fields.triggers) setTriggers((fields.triggers as string[]).join(', '));
+      if (fields.symptoms) setSymptoms((fields.symptoms as string[]).join(', '));
+      if (fields.tags) setTags((fields.tags as string[]).join(', '));
+
+      // Content = body only (no frontmatter)
+      setContent(body);
+
+      // Switch to form tab so user sees the populated fields
+      setTab('form');
     };
     reader.readAsText(file);
   };

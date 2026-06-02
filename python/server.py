@@ -909,7 +909,9 @@ async def skills_upload(
     request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    import tempfile
+    import yaml
+    from skills.registry import _split_frontmatter
+
     form = await request.form()
     file = form.get("file")
     if file is None:
@@ -917,12 +919,33 @@ async def skills_upload(
     content = await file.read()
     text = content.decode("utf-8")
     name = getattr(file, "filename", "uploaded_skill.md") or "uploaded_skill.md"
+
+    # Parse YAML frontmatter so metadata is properly extracted and
+    # the content column stores only the body, not the raw frontmatter.
+    frontmatter_yaml, body = _split_frontmatter(text)
+    if frontmatter_yaml:
+        try:
+            meta = yaml.safe_load(frontmatter_yaml) or {}
+        except yaml.YAMLError:
+            meta = {}
+    else:
+        meta = {}
+
+    if not body.strip():
+        body = text  # fallback: store entire file
+
     skill_id = await asyncio.to_thread(
         db_skills.create_skill,
         user_id=current_user["id"],
-        name=name.replace(".md", "").replace(".yaml", "").replace(".yml", ""),
-        content=text,
-        description=f"Uploaded from {name}",
+        name=meta.get("name") or name.replace(".md", "").replace(".yaml", "").replace(".yml", ""),
+        content=body,
+        description=meta.get("description") or f"Uploaded from {name}",
+        skill_type=meta.get("skill_type", "case"),
+        category=meta.get("category", ""),
+        keywords=meta.get("keywords"),
+        triggers=meta.get("triggers"),
+        symptoms=meta.get("symptoms"),
+        tags=meta.get("tags"),
     )
     return {"id": skill_id}
 
